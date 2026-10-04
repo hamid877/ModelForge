@@ -7,7 +7,11 @@ authors = [
     { name = "Mohd Hamid", email = "hamidmohd726@gmail.com" }
 ]
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "joblib>=1.6.0",
+    "pandas>=3.0.6",
+    "scikit-learn>=1.9.1",
+]
 
 [tool.uv]
 package = false

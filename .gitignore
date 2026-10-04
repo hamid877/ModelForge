@@ -22,6 +22,7 @@ env/
 
 # Local datasets
 data/raw/*
+!data/raw/churn.csv
 data/processed/*
 
 # Model files
