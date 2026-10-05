@@ -1,7 +1,7 @@
 import pandas as pd
 
 from backend.app.ml.evaluation import evaluate_churn_model
-from backend.app.ml.training import train_churn_model
+from backend.app.ml.training import TrainingConfig, train_churn_model
 
 
 def test_evaluate_churn_model():
@@ -22,8 +22,8 @@ def test_evaluate_churn_model():
             "churn": [1, 0, 1, 0, 1, 0],
         }
     )
-
-    model = train_churn_model(df)
+    config = TrainingConfig()
+    model = train_churn_model(df, config)
 
     metrics = evaluate_churn_model(
         model,
