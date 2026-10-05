@@ -2,7 +2,12 @@ from pathlib import Path
 
 import pandas as pd
 
-from backend.app.ml.training import save_model, split_training_data, train_churn_model
+from backend.app.ml.training import (
+    TrainingConfig,
+    save_model,
+    split_training_data,
+    train_churn_model,
+)
 
 
 def test_train_churn_model():
@@ -24,7 +29,8 @@ def test_train_churn_model():
         }
     )
 
-    model = train_churn_model(df)
+    config = TrainingConfig()
+    model = train_churn_model(df, config)
 
     predictions = model.predict(df.drop(columns=["churn"]))
 
@@ -65,8 +71,8 @@ def test_split_training_data():
             "churn": [1, 0, 1, 0, 1, 0, 1, 0, 1, 0],
         }
     )
-
-    X_train, X_test, y_train, y_test = split_training_data(df)
+    config = TrainingConfig()
+    X_train, X_test, y_train, y_test = split_training_data(df, config)
 
     assert len(X_train) == 8
     assert len(X_test) == 2
@@ -88,8 +94,8 @@ def test_save_model(tmp_path: Path):
             "churn": [1, 0, 1, 0],
         }
     )
-
-    model = train_churn_model(df)
+    config = TrainingConfig()
+    model = train_churn_model(df, config)
 
     model_path = tmp_path / "churn_model.joblib"
 
