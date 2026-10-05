@@ -1,8 +1,10 @@
 from pathlib import Path
 
+import mlflow
 import pandas as pd
 
 from backend.app.ml.evaluation import evaluate_churn_model
+from backend.app.ml.tracking import setup_mlflow
 from backend.app.ml.training import (
     save_model,
     split_training_data,
@@ -16,15 +18,23 @@ def run_training(
 ) -> dict[str, float]:
     """Train, evaluate, and save a churn model."""
 
-    X_train, X_test, y_train, y_test = split_training_data(df)
+    setup_mlflow()
 
-    train_df = X_train.copy()
-    train_df["churn"] = y_train
+    with mlflow.start_run():
+        X_train, X_test, y_train, y_test = split_training_data(df)
 
-    model = train_churn_model(train_df)
+        train_df = X_train.copy()
+        train_df["churn"] = y_train
 
-    metrics = evaluate_churn_model(model, X_test, y_test)
+        model = train_churn_model(train_df)
 
-    save_model(model, model_path)
+        metrics = evaluate_churn_model(model, X_test, y_test)
+
+        mlflow.log_metric("accuracy", metrics["accuracy"])
+        mlflow.log_metric("f1_score", metrics["f1_score"])
+
+        save_model(model, model_path)
+
+        mlflow.log_artifact(model_path)
 
     return metrics
