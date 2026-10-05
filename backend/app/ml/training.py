@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 from pathlib import Path
 
 import pandas as pd
@@ -8,7 +9,19 @@ from sklearn.pipeline import Pipeline
 from backend.app.ml.preprocessing import create_preprocessor, split_features_target
 
 
-def train_churn_model(df: pd.DataFrame) -> Pipeline:
+@dataclass(frozen=True)
+class TrainingConfig:
+    """Configuration for churn model training."""
+
+    test_size: float = 0.2
+    random_state: int = 42
+    max_iter: int = 1000
+
+
+def train_churn_model(
+    df: pd.DataFrame,
+    config: TrainingConfig,
+) -> Pipeline:
     """Train a logistic regression churn model."""
 
     X, y = split_features_target(df)
@@ -16,7 +29,7 @@ def train_churn_model(df: pd.DataFrame) -> Pipeline:
     pipeline = Pipeline(
         steps=[
             ("preprocessor", create_preprocessor()),
-            ("model", LogisticRegression(max_iter=1000)),
+            ("model", LogisticRegression(max_iter=config.max_iter)),
         ]
     )
 
@@ -27,8 +40,7 @@ def train_churn_model(df: pd.DataFrame) -> Pipeline:
 
 def split_training_data(
     df: pd.DataFrame,
-    test_size: float = 0.2,
-    random_state: int = 42,
+    config: TrainingConfig,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.Series, pd.Series]:
     """Split the dataset into training and testing sets."""
 
@@ -37,8 +49,8 @@ def split_training_data(
     return train_test_split(
         X,
         y,
-        test_size=test_size,
-        random_state=random_state,
+        test_size=config.test_size,
+        random_state=config.random_state,
         stratify=y,
     )
 
