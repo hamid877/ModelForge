@@ -16,13 +16,18 @@ from backend.app.ml.training import (
 def run_training(
     df: pd.DataFrame,
     model_path: str | Path,
+    config: TrainingConfig | None = None,
 ) -> dict[str, float]:
     """Train, evaluate, and save a churn model."""
-    config = TrainingConfig()
+    config = config or TrainingConfig()
 
     setup_mlflow()
+    run_name = f"logistic-regression-c{config.c:g}"
+    with mlflow.start_run(run_name=run_name):
+        mlflow.set_tag("model_family", "logistic_regression")
+        mlflow.set_tag("dataset", "churn")
+        mlflow.set_tag("stage", "experimentation")
 
-    with mlflow.start_run():
         X_train, X_test, y_train, y_test = split_training_data(
             df,
             config,
@@ -39,6 +44,7 @@ def run_training(
         mlflow.log_param("test_size", config.test_size)
         mlflow.log_param("random_state", config.random_state)
         mlflow.log_param("max_iter", config.max_iter)
+        mlflow.log_param("C", config.c)
 
         mlflow.log_metric("accuracy", metrics["accuracy"])
         mlflow.log_metric("f1_score", metrics["f1_score"])
