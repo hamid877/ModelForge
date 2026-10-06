@@ -16,6 +16,7 @@ class TrainingConfig:
     test_size: float = 0.2
     random_state: int = 42
     max_iter: int = 1000
+    c: float = 1.0
 
 
 def train_churn_model(
@@ -29,7 +30,7 @@ def train_churn_model(
     pipeline = Pipeline(
         steps=[
             ("preprocessor", create_preprocessor()),
-            ("model", LogisticRegression(max_iter=config.max_iter)),
+            ("model", LogisticRegression(C=config.c, max_iter=config.max_iter)),
         ]
     )
 
