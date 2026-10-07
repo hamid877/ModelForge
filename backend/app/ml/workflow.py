@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import mlflow
+import mlflow.sklearn
 import pandas as pd
 
 from backend.app.ml.evaluation import evaluate_churn_model
@@ -17,6 +18,7 @@ def run_training(
     df: pd.DataFrame,
     model_path: str | Path,
     config: TrainingConfig | None = None,
+    register_model: bool = False,
 ) -> dict[str, float]:
     """Train, evaluate, and save a churn model."""
     config = config or TrainingConfig()
@@ -50,6 +52,13 @@ def run_training(
         mlflow.log_metric("f1_score", metrics["f1_score"])
 
         save_model(model, model_path)
+
         mlflow.log_artifact(model_path)
 
+        if register_model:
+            mlflow.sklearn.log_model(
+                model,
+                name="churn_model",
+                registered_model_name="churn-classifier",
+            )
     return metrics
