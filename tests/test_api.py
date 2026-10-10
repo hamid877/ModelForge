@@ -44,7 +44,10 @@ def test_predict_endpoint(mock_load_model):
     )
 
 
-def test_predict_rejects_invalid_age():
+@patch("backend.app.api.api.load_registered_model_by_alias")
+def test_predict_rejects_invalid_age(mock_load_model):
+    mock_load_model.return_value.predict.return_value = [0]
+
     with TestClient(app) as client:
         response = client.post(
             "/predict",
@@ -58,3 +61,7 @@ def test_predict_rejects_invalid_age():
         )
 
     assert response.status_code == 422
+    mock_load_model.assert_called_once_with(
+        "churn-classifier",
+        "champion",
+    )
