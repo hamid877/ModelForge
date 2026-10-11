@@ -2,6 +2,7 @@ from contextlib import asynccontextmanager
 
 import pandas as pd
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse
 
 from backend.app.api.schemas import ChurnPredictionRequest
 from backend.app.ml.registry import load_registered_model_by_alias
@@ -28,8 +29,22 @@ app = FastAPI(
 
 @app.get("/health")
 def health_check() -> dict[str, str]:
-    """Return the API health status."""
+    """Return the API liveness status."""
     return {"status": "healthy"}
+
+
+@app.get("/ready")
+def readiness_check(request: Request):
+    """Report whether the API has a model available for predictions."""
+    model = getattr(request.app.state, "churn_model", None)
+
+    if model is None:
+        return JSONResponse(
+            status_code=503,
+            content={"status": "not_ready"},
+        )
+
+    return {"status": "ready"}
 
 
 @app.post("/predict")
