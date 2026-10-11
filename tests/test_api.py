@@ -1,5 +1,6 @@
 from unittest.mock import patch
 
+import pytest
 from fastapi.testclient import TestClient
 
 from backend.app.api.api import app
@@ -90,3 +91,35 @@ def test_ready_endpoint_without_model():
 
     assert response.status_code == 503
     assert response.json() == {"status": "not_ready"}
+
+
+def test_startup_fails_when_model_cannot_load():
+    """Propagate model-loading failures during application startup."""
+    with patch(
+        "backend.app.api.api.load_registered_model_by_alias",
+        side_effect=RuntimeError("Model loading failed"),
+    ):
+        with pytest.raises(RuntimeError, match="Model loading failed"):
+            with TestClient(app):
+                pass
+
+
+def test_predict_returns_503_when_model_prediction_fails():
+    """Return 503 when the cached model cannot make a prediction."""
+    with patch("backend.app.api.api.load_registered_model_by_alias") as mock_load:
+        mock_load.return_value.predict.side_effect = RuntimeError("Prediction failed")
+
+        with TestClient(app) as client:
+            response = client.post(
+                "/predict",
+                json={
+                    "age": 35,
+                    "tenure": 12,
+                    "monthly_charges": 75.0,
+                    "contract_type": "monthly",
+                    "support_tickets": 2,
+                },
+            )
+
+    assert response.status_code == 503
+    assert response.json() == {"detail": "The churn prediction service is unavailable."}

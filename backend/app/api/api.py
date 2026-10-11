@@ -5,6 +5,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 
 from backend.app.api.schemas import ChurnPredictionRequest
+from backend.app.config import settings
 from backend.app.ml.registry import load_registered_model_by_alias
 
 
@@ -12,8 +13,8 @@ from backend.app.ml.registry import load_registered_model_by_alias
 async def lifespan(app: FastAPI):
     """Load the champion model once during application startup."""
     app.state.churn_model = load_registered_model_by_alias(
-        "churn-classifier",
-        "champion",
+        settings.model_name,
+        settings.model_alias,
     )
     yield
     app.state.churn_model = None
