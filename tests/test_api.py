@@ -65,3 +65,28 @@ def test_predict_rejects_invalid_age(mock_load_model):
         "churn-classifier",
         "champion",
     )
+
+
+def test_ready_endpoint():
+    """Return ready when the cached model is loaded."""
+    with patch("backend.app.api.api.load_registered_model_by_alias") as mock_load:
+        mock_load.return_value.predict.return_value = [0]
+
+        with TestClient(app) as client:
+            response = client.get("/ready")
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "ready"}
+
+
+def test_ready_endpoint_without_model():
+    """Return not ready when no model is cached."""
+    with patch("backend.app.api.api.load_registered_model_by_alias") as mock_load:
+        mock_load.return_value.predict.return_value = [0]
+
+        with TestClient(app) as client:
+            app.state.churn_model = None
+            response = client.get("/ready")
+
+    assert response.status_code == 503
+    assert response.json() == {"status": "not_ready"}
