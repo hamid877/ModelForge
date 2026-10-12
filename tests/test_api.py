@@ -1,3 +1,4 @@
+import logging
 from unittest.mock import patch
 
 import pytest
@@ -123,3 +124,69 @@ def test_predict_returns_503_when_model_prediction_fails():
 
     assert response.status_code == 503
     assert response.json() == {"detail": "The churn prediction service is unavailable."}
+
+
+def test_startup_logs_model_loading_success(caplog):
+    """Log successful model loading during startup."""
+    with patch("backend.app.api.api.load_registered_model_by_alias") as mock_load:
+        mock_load.return_value.predict.return_value = [0]
+
+        with caplog.at_level(
+            logging.INFO,
+            logger="backend.app.api.api",
+        ):
+            with TestClient(app):
+                pass
+
+    assert "model_loading_started" in caplog.text
+    assert "model_loading_succeeded" in caplog.text
+
+
+def test_startup_logs_model_loading_failure(caplog):
+    """Log model-loading failures before propagating them."""
+    with patch(
+        "backend.app.api.api.load_registered_model_by_alias",
+        side_effect=RuntimeError("Model loading failed"),
+    ):
+        with caplog.at_level(
+            logging.ERROR,
+            logger="backend.app.api.api",
+        ):
+            with pytest.raises(
+                RuntimeError,
+                match="Model loading failed",
+            ):
+                with TestClient(app):
+                    pass
+
+    assert "model_loading_failed" in caplog.text
+    assert "RuntimeError: Model loading failed" in caplog.text
+
+
+def test_prediction_failure_is_logged(caplog):
+    """Log prediction failures without exposing details to clients."""
+    with patch("backend.app.api.api.load_registered_model_by_alias") as mock_load:
+        mock_load.return_value.predict.side_effect = RuntimeError(
+            "Internal prediction failure"
+        )
+
+        with TestClient(app) as client:
+            with caplog.at_level(
+                logging.ERROR,
+                logger="backend.app.api.api",
+            ):
+                response = client.post(
+                    "/predict",
+                    json={
+                        "age": 35,
+                        "tenure": 12,
+                        "monthly_charges": 75.0,
+                        "contract_type": "monthly",
+                        "support_tickets": 2,
+                    },
+                )
+
+    assert response.status_code == 503
+    assert response.json() == {"detail": "The churn prediction service is unavailable."}
+    assert "prediction_failed" in caplog.text
+    assert "Internal prediction failure" in caplog.text
