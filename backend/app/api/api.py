@@ -1,3 +1,4 @@
+import logging
 from contextlib import asynccontextmanager
 
 import pandas as pd
@@ -8,16 +9,41 @@ from backend.app.api.schemas import ChurnPredictionRequest
 from backend.app.config import settings
 from backend.app.ml.registry import load_registered_model_by_alias
 
+logger = logging.getLogger(__name__)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Load the champion model once during application startup."""
-    app.state.churn_model = load_registered_model_by_alias(
+    logger.info(
+        "model_loading_started model_name=%s model_alias=%s",
         settings.model_name,
         settings.model_alias,
     )
+
+    try:
+        app.state.churn_model = load_registered_model_by_alias(
+            settings.model_name,
+            settings.model_alias,
+        )
+    except Exception:
+        logger.exception(
+            "model_loading_failed model_name=%s model_alias=%s",
+            settings.model_name,
+            settings.model_alias,
+        )
+        raise
+
+    logger.info(
+        "model_loading_succeeded model_name=%s model_alias=%s",
+        settings.model_name,
+        settings.model_alias,
+    )
+
     yield
+
     app.state.churn_model = None
+    logger.info("model_unloaded")
 
 
 app = FastAPI(
@@ -60,8 +86,9 @@ def predict_churn(
         prediction = int(model.predict(customer)[0])
 
         return {"churn_prediction": prediction}
-    except Exception as exc:
+    except Exception:
+        logger.exception("prediction_failed")
         raise HTTPException(
             status_code=503,
             detail="The churn prediction service is unavailable.",
-        ) from exc
+        ) from None
