@@ -1,3 +1,4 @@
+
 services:
   mlflow:
     image: modelforge-api:dev
@@ -20,6 +21,12 @@ services:
       - ./mlruns:${PWD}/mlruns
     ports:
       - "5001:5000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
     restart: unless-stopped
 
   api:
@@ -29,9 +36,16 @@ services:
       MODELFORGE_MODEL_ALIAS: champion
       MLFLOW_TRACKING_URI: http://mlflow:5000
     volumes:
-        - ./.docker-data/mlruns:${PWD}/mlruns
+      - ./.docker-data/mlruns:${PWD}/mlruns
     ports:
       - "8000:8000"
     depends_on:
-      - mlflow
+      mlflow:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/ready', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
     restart: unless-stopped
