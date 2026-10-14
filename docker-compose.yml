@@ -1,0 +1,37 @@
+services:
+  mlflow:
+    image: modelforge-api:dev
+    command:
+      - uv
+      - run
+      - --no-sync
+      - mlflow
+      - server
+      - --backend-store-uri
+      - sqlite:///${PWD}/mlflow.db
+      - --host
+      - 0.0.0.0
+      - --port
+      - "5000"
+      - --allowed-hosts
+      - "mlflow:5000,localhost:5001,localhost:5000,127.0.0.1:*"
+    volumes:
+      - ./mlflow.db:${PWD}/mlflow.db
+      - ./mlruns:${PWD}/mlruns
+    ports:
+      - "5001:5000"
+    restart: unless-stopped
+
+  api:
+    image: modelforge-api:dev
+    environment:
+      MODELFORGE_MODEL_NAME: churn-classifier
+      MODELFORGE_MODEL_ALIAS: champion
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+    volumes:
+        - ./.docker-data/mlruns:${PWD}/mlruns
+    ports:
+      - "8000:8000"
+    depends_on:
+      - mlflow
+    restart: unless-stopped
