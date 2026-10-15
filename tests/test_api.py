@@ -190,3 +190,32 @@ def test_prediction_failure_is_logged(caplog):
     assert response.json() == {"detail": "The churn prediction service is unavailable."}
     assert "prediction_failed" in caplog.text
     assert "Internal prediction failure" in caplog.text
+
+
+def test_predict_returns_503_when_model_is_missing(caplog):
+    """Log a missing model and return a safe error response."""
+    with patch("backend.app.api.api.load_registered_model_by_alias") as mock_load:
+        mock_load.return_value.predict.return_value = [0]
+
+        with TestClient(app) as client:
+            app.state.churn_model = None
+
+            with caplog.at_level(
+                logging.ERROR,
+                logger="backend.app.api.api",
+            ):
+                response = client.post(
+                    "/predict",
+                    json={
+                        "age": 35,
+                        "tenure": 12,
+                        "monthly_charges": 75.0,
+                        "contract_type": "monthly",
+                        "support_tickets": 2,
+                    },
+                )
+
+    assert response.status_code == 503
+    assert response.json() == {"detail": "The churn prediction service is unavailable."}
+    assert "prediction_failed reason=model_not_loaded" in caplog.text
+    assert "NoneType" not in caplog.text

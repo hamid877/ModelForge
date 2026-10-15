@@ -80,8 +80,16 @@ def predict_churn(
     api_request: Request,
 ) -> dict[str, int]:
     """Predict whether a customer will churn."""
+    model = getattr(api_request.app.state, "churn_model", None)
+
+    if model is None:
+        logger.error("prediction_failed reason=model_not_loaded")
+        raise HTTPException(
+            status_code=503,
+            detail="The churn prediction service is unavailable.",
+        )
+
     try:
-        model = api_request.app.state.churn_model
         customer = pd.DataFrame([request.model_dump()])
         prediction = int(model.predict(customer)[0])
 
