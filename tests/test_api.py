@@ -219,3 +219,32 @@ def test_predict_returns_503_when_model_is_missing(caplog):
     assert response.json() == {"detail": "The churn prediction service is unavailable."}
     assert "prediction_failed reason=model_not_loaded" in caplog.text
     assert "NoneType" not in caplog.text
+
+
+@pytest.mark.parametrize(
+    "model_output",
+    [
+        [2],
+        [],
+        [0, 1],
+    ],
+)
+def test_predict_returns_503_for_invalid_model_output(model_output):
+    """Reject predictions that violate the binary single-prediction contract."""
+    with patch("backend.app.api.api.load_registered_model_by_alias") as mock_load:
+        mock_load.return_value.predict.return_value = model_output
+
+        with TestClient(app) as client:
+            response = client.post(
+                "/predict",
+                json={
+                    "age": 35,
+                    "tenure": 12,
+                    "monthly_charges": 75.0,
+                    "contract_type": "monthly",
+                    "support_tickets": 2,
+                },
+            )
+
+    assert response.status_code == 503
+    assert response.json() == {"detail": "The churn prediction service is unavailable."}
