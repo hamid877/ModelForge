@@ -60,3 +60,14 @@ def test_empty_contract_type_is_rejected():
             contract_type="",
             support_tickets=2,
         )
+
+
+def test_whitespace_only_contract_type_is_rejected():
+    with pytest.raises(ValidationError):
+        ChurnPredictionRequest(
+            age=35,
+            tenure=24,
+            monthly_charges=79.99,
+            contract_type="   ",
+            support_tickets=2,
+        )
