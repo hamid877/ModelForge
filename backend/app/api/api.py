@@ -91,7 +91,17 @@ def predict_churn(
 
     try:
         customer = pd.DataFrame([request.model_dump()])
-        prediction = int(model.predict(customer)[0])
+        predictions = model.predict(customer)
+
+        if len(predictions) != 1:
+            raise ValueError("The model must return exactly one prediction.")
+
+        raw_prediction = predictions[0]
+
+        if raw_prediction not in (0, 1):
+            raise ValueError("The model prediction must be either 0 or 1.")
+
+        prediction = int(raw_prediction)
 
         return {"churn_prediction": prediction}
     except Exception:
