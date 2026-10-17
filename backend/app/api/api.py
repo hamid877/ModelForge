@@ -1,4 +1,5 @@
 import logging
+import time
 from contextlib import asynccontextmanager
 
 import pandas as pd
@@ -19,6 +20,8 @@ async def lifespan(app: FastAPI):
         "prediction_requests_total": 0,
         "predictions_succeeded_total": 0,
         "predictions_failed_total": 0,
+        "prediction_latency_total_seconds": 0.0,
+        "prediction_latency_max_seconds": 0.0,
     }
     logger.info(
         "model_loading_started model_name=%s model_alias=%s",
@@ -85,7 +88,7 @@ def readiness_check(request: Request):
 
 
 @app.get("/metrics")
-def prediction_metrics(request: Request) -> dict[str, int]:
+def prediction_metrics(request: Request) -> dict[str, int | float]:
     """Return process-local prediction counters."""
     return request.app.state.prediction_metrics.copy()
 
@@ -96,19 +99,21 @@ def predict_churn(
     api_request: Request,
 ) -> dict[str, int]:
     """Predict whether a customer will churn."""
-    model = getattr(api_request.app.state, "churn_model", None)
     metrics = api_request.app.state.prediction_metrics
     metrics["prediction_requests_total"] += 1
-
-    if model is None:
-        metrics["predictions_failed_total"] += 1
-        logger.error("prediction_failed reason=model_not_loaded")
-        raise HTTPException(
-            status_code=503,
-            detail="The churn prediction service is unavailable.",
-        )
+    start_time = time.perf_counter()
 
     try:
+        model = getattr(api_request.app.state, "churn_model", None)
+
+        if model is None:
+            metrics["predictions_failed_total"] += 1
+            logger.error("prediction_failed reason=model_not_loaded")
+            raise HTTPException(
+                status_code=503,
+                detail="The churn prediction service is unavailable.",
+            )
+
         customer = pd.DataFrame([request.model_dump()])
         predictions = model.predict(customer)
 
@@ -123,6 +128,9 @@ def predict_churn(
         prediction = int(raw_prediction)
         metrics["predictions_succeeded_total"] += 1
         return {"churn_prediction": prediction}
+
+    except HTTPException:
+        raise
     except Exception:
         metrics["predictions_failed_total"] += 1
         logger.exception("prediction_failed")
@@ -130,3 +138,10 @@ def predict_churn(
             status_code=503,
             detail="The churn prediction service is unavailable.",
         ) from None
+    finally:
+        elapsed = time.perf_counter() - start_time
+        metrics["prediction_latency_total_seconds"] += elapsed
+        metrics["prediction_latency_max_seconds"] = max(
+            metrics["prediction_latency_max_seconds"],
+            elapsed,
+        )

@@ -251,7 +251,7 @@ def test_predict_returns_503_for_invalid_model_output(model_output):
 
 
 def test_metrics_endpoint_starts_with_zero_counters():
-    """Expose zeroed prediction counters before any requests."""
+    """Expose zeroed prediction metrics before any requests."""
     with patch("backend.app.api.api.load_registered_model_by_alias") as mock_load:
         mock_load.return_value.predict.return_value = [0]
 
@@ -263,6 +263,8 @@ def test_metrics_endpoint_starts_with_zero_counters():
         "prediction_requests_total": 0,
         "predictions_succeeded_total": 0,
         "predictions_failed_total": 0,
+        "prediction_latency_total_seconds": 0.0,
+        "prediction_latency_max_seconds": 0.0,
     }
 
 
@@ -284,12 +286,14 @@ def test_metrics_endpoint_tracks_successful_prediction():
             )
             metrics_response = client.get("/metrics")
 
-    assert prediction_response.status_code == 200
-    assert metrics_response.json() == {
-        "prediction_requests_total": 1,
-        "predictions_succeeded_total": 1,
-        "predictions_failed_total": 0,
-    }
+        metrics = metrics_response.json()
+
+        assert prediction_response.status_code == 200
+        assert metrics["prediction_requests_total"] == 1
+        assert metrics["predictions_succeeded_total"] == 1
+        assert metrics["predictions_failed_total"] == 0
+        assert metrics["prediction_latency_total_seconds"] > 0
+        assert metrics["prediction_latency_max_seconds"] > 0
 
 
 def test_metrics_endpoint_tracks_failed_prediction():
@@ -310,9 +314,93 @@ def test_metrics_endpoint_tracks_failed_prediction():
             )
             metrics_response = client.get("/metrics")
 
+        metrics = metrics_response.json()
+
+        assert prediction_response.status_code == 503
+        assert metrics["prediction_requests_total"] == 1
+        assert metrics["predictions_succeeded_total"] == 0
+        assert metrics["predictions_failed_total"] == 1
+        assert metrics["prediction_latency_total_seconds"] > 0
+        assert metrics["prediction_latency_max_seconds"] > 0
+
+
+def test_metrics_endpoint_tracks_prediction_latency():
+    """Expose total and maximum latency after a successful prediction."""
+    with patch("backend.app.api.api.load_registered_model_by_alias") as mock_load:
+        mock_load.return_value.predict.return_value = [1]
+
+        with TestClient(app) as client:
+            prediction_response = client.post(
+                "/predict",
+                json={
+                    "age": 35,
+                    "tenure": 24,
+                    "monthly_charges": 79.99,
+                    "contract_type": "monthly",
+                    "support_tickets": 2,
+                },
+            )
+            metrics_response = client.get("/metrics")
+
+    metrics = metrics_response.json()
+
+    assert prediction_response.status_code == 200
+    assert metrics["prediction_latency_total_seconds"] > 0
+    assert metrics["prediction_latency_max_seconds"] > 0
+    assert (
+        metrics["prediction_latency_total_seconds"]
+        >= metrics["prediction_latency_max_seconds"]
+    )
+
+
+def test_metrics_endpoint_tracks_latency_when_prediction_fails():
+    """Record latency even when the model raises an exception."""
+    with patch("backend.app.api.api.load_registered_model_by_alias") as mock_load:
+        mock_load.return_value.predict.side_effect = RuntimeError("Prediction failed")
+
+        with TestClient(app) as client:
+            prediction_response = client.post(
+                "/predict",
+                json={
+                    "age": 35,
+                    "tenure": 24,
+                    "monthly_charges": 79.99,
+                    "contract_type": "monthly",
+                    "support_tickets": 2,
+                },
+            )
+            metrics_response = client.get("/metrics")
+
+    metrics = metrics_response.json()
+
     assert prediction_response.status_code == 503
-    assert metrics_response.json() == {
-        "prediction_requests_total": 1,
-        "predictions_succeeded_total": 0,
-        "predictions_failed_total": 1,
-    }
+    assert metrics["prediction_latency_total_seconds"] > 0
+    assert metrics["prediction_latency_max_seconds"] > 0
+
+
+def test_metrics_endpoint_tracks_latency_when_model_is_missing():
+    """Record latency when the model is unavailable."""
+    with patch("backend.app.api.api.load_registered_model_by_alias") as mock_load:
+        mock_load.return_value.predict.return_value = [0]
+
+        with TestClient(app) as client:
+            app.state.churn_model = None
+            prediction_response = client.post(
+                "/predict",
+                json={
+                    "age": 35,
+                    "tenure": 24,
+                    "monthly_charges": 79.99,
+                    "contract_type": "monthly",
+                    "support_tickets": 2,
+                },
+            )
+            metrics_response = client.get("/metrics")
+
+    metrics = metrics_response.json()
+
+    assert prediction_response.status_code == 503
+    assert metrics["prediction_requests_total"] == 1
+    assert metrics["predictions_failed_total"] == 1
+    assert metrics["prediction_latency_total_seconds"] > 0
+    assert metrics["prediction_latency_max_seconds"] > 0
