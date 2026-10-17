@@ -15,6 +15,11 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Load the champion model once during application startup."""
+    app.state.prediction_metrics = {
+        "prediction_requests_total": 0,
+        "predictions_succeeded_total": 0,
+        "predictions_failed_total": 0,
+    }
     logger.info(
         "model_loading_started model_name=%s model_alias=%s",
         settings.model_name,
@@ -52,6 +57,11 @@ app = FastAPI(
     version="0.1.0",
     lifespan=lifespan,
 )
+app.state.prediction_metrics = {
+    "prediction_requests_total": 0,
+    "predictions_succeeded_total": 0,
+    "predictions_failed_total": 0,
+}
 
 
 @app.get("/health")
@@ -74,6 +84,12 @@ def readiness_check(request: Request):
     return {"status": "ready"}
 
 
+@app.get("/metrics")
+def prediction_metrics(request: Request) -> dict[str, int]:
+    """Return process-local prediction counters."""
+    return request.app.state.prediction_metrics.copy()
+
+
 @app.post("/predict")
 def predict_churn(
     request: ChurnPredictionRequest,
@@ -81,8 +97,11 @@ def predict_churn(
 ) -> dict[str, int]:
     """Predict whether a customer will churn."""
     model = getattr(api_request.app.state, "churn_model", None)
+    metrics = api_request.app.state.prediction_metrics
+    metrics["prediction_requests_total"] += 1
 
     if model is None:
+        metrics["predictions_failed_total"] += 1
         logger.error("prediction_failed reason=model_not_loaded")
         raise HTTPException(
             status_code=503,
@@ -102,9 +121,10 @@ def predict_churn(
             raise ValueError("The model prediction must be either 0 or 1.")
 
         prediction = int(raw_prediction)
-
+        metrics["predictions_succeeded_total"] += 1
         return {"churn_prediction": prediction}
     except Exception:
+        metrics["predictions_failed_total"] += 1
         logger.exception("prediction_failed")
         raise HTTPException(
             status_code=503,

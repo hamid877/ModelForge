@@ -248,3 +248,71 @@ def test_predict_returns_503_for_invalid_model_output(model_output):
 
     assert response.status_code == 503
     assert response.json() == {"detail": "The churn prediction service is unavailable."}
+
+
+def test_metrics_endpoint_starts_with_zero_counters():
+    """Expose zeroed prediction counters before any requests."""
+    with patch("backend.app.api.api.load_registered_model_by_alias") as mock_load:
+        mock_load.return_value.predict.return_value = [0]
+
+        with TestClient(app) as client:
+            response = client.get("/metrics")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "prediction_requests_total": 0,
+        "predictions_succeeded_total": 0,
+        "predictions_failed_total": 0,
+    }
+
+
+def test_metrics_endpoint_tracks_successful_prediction():
+    """Increment request and success counters after a prediction."""
+    with patch("backend.app.api.api.load_registered_model_by_alias") as mock_load:
+        mock_load.return_value.predict.return_value = [1]
+
+        with TestClient(app) as client:
+            prediction_response = client.post(
+                "/predict",
+                json={
+                    "age": 35,
+                    "tenure": 24,
+                    "monthly_charges": 79.99,
+                    "contract_type": "monthly",
+                    "support_tickets": 2,
+                },
+            )
+            metrics_response = client.get("/metrics")
+
+    assert prediction_response.status_code == 200
+    assert metrics_response.json() == {
+        "prediction_requests_total": 1,
+        "predictions_succeeded_total": 1,
+        "predictions_failed_total": 0,
+    }
+
+
+def test_metrics_endpoint_tracks_failed_prediction():
+    """Increment request and failure counters when prediction fails."""
+    with patch("backend.app.api.api.load_registered_model_by_alias") as mock_load:
+        mock_load.return_value.predict.side_effect = RuntimeError("Prediction failed")
+
+        with TestClient(app) as client:
+            prediction_response = client.post(
+                "/predict",
+                json={
+                    "age": 35,
+                    "tenure": 24,
+                    "monthly_charges": 79.99,
+                    "contract_type": "monthly",
+                    "support_tickets": 2,
+                },
+            )
+            metrics_response = client.get("/metrics")
+
+    assert prediction_response.status_code == 503
+    assert metrics_response.json() == {
+        "prediction_requests_total": 1,
+        "predictions_succeeded_total": 0,
+        "predictions_failed_total": 1,
+    }
