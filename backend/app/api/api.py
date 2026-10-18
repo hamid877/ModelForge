@@ -1,5 +1,6 @@
 import logging
 import time
+from collections import deque
 from contextlib import asynccontextmanager
 
 import pandas as pd
@@ -23,6 +24,7 @@ async def lifespan(app: FastAPI):
         "prediction_latency_total_seconds": 0.0,
         "prediction_latency_max_seconds": 0.0,
     }
+    app.state.prediction_latency_samples = deque(maxlen=1000)
     logger.info(
         "model_loading_started model_name=%s model_alias=%s",
         settings.model_name,
@@ -87,6 +89,22 @@ def readiness_check(request: Request):
     return {"status": "ready"}
 
 
+def _percentile(sorted_samples: list[float], percentile: float) -> float:
+    """Calculate a linearly interpolated percentile."""
+    if len(sorted_samples) == 1:
+        return sorted_samples[0]
+
+    position = (len(sorted_samples) - 1) * percentile / 100
+    lower_index = int(position)
+    upper_index = min(lower_index + 1, len(sorted_samples) - 1)
+    fraction = position - lower_index
+
+    return (
+        sorted_samples[lower_index] * (1 - fraction)
+        + sorted_samples[upper_index] * fraction
+    )
+
+
 @app.get("/metrics")
 def prediction_metrics(request: Request) -> dict[str, int | float]:
     """Return process-local prediction metrics."""
@@ -98,6 +116,17 @@ def prediction_metrics(request: Request) -> dict[str, int | float]:
         if request_count > 0
         else 0.0
     )
+
+    samples = sorted(request.app.state.prediction_latency_samples)
+
+    if samples:
+        metrics["prediction_latency_p50_seconds"] = _percentile(samples, 50)
+        metrics["prediction_latency_p95_seconds"] = _percentile(samples, 95)
+        metrics["prediction_latency_p99_seconds"] = _percentile(samples, 99)
+    else:
+        metrics["prediction_latency_p50_seconds"] = 0.0
+        metrics["prediction_latency_p95_seconds"] = 0.0
+        metrics["prediction_latency_p99_seconds"] = 0.0
 
     return metrics
 
@@ -147,6 +176,7 @@ def predict_churn(
             status_code=503,
             detail="The churn prediction service is unavailable.",
         ) from None
+
     finally:
         elapsed = time.perf_counter() - start_time
         metrics["prediction_latency_total_seconds"] += elapsed
@@ -154,3 +184,4 @@ def predict_churn(
             metrics["prediction_latency_max_seconds"],
             elapsed,
         )
+        api_request.app.state.prediction_latency_samples.append(elapsed)
