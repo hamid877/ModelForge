@@ -265,6 +265,7 @@ def test_metrics_endpoint_starts_with_zero_counters():
         "predictions_failed_total": 0,
         "prediction_latency_total_seconds": 0.0,
         "prediction_latency_max_seconds": 0.0,
+        "prediction_latency_average_seconds": 0.0,
     }
 
 
@@ -404,3 +405,34 @@ def test_metrics_endpoint_tracks_latency_when_model_is_missing():
     assert metrics["predictions_failed_total"] == 1
     assert metrics["prediction_latency_total_seconds"] > 0
     assert metrics["prediction_latency_max_seconds"] > 0
+
+
+def test_metrics_endpoint_reports_average_prediction_latency():
+    """Calculate average latency from total latency and request count."""
+    with patch("backend.app.api.api.load_registered_model_by_alias") as mock_load:
+        mock_load.return_value.predict.return_value = [1]
+
+        with TestClient(app) as client:
+            for _ in range(2):
+                response = client.post(
+                    "/predict",
+                    json={
+                        "age": 35,
+                        "tenure": 24,
+                        "monthly_charges": 79.99,
+                        "contract_type": "monthly",
+                        "support_tickets": 2,
+                    },
+                )
+                assert response.status_code == 200
+
+            metrics_response = client.get("/metrics")
+
+    metrics = metrics_response.json()
+
+    assert metrics["prediction_requests_total"] == 2
+    assert metrics["prediction_latency_total_seconds"] > 0
+    assert metrics["prediction_latency_average_seconds"] > 0
+    assert metrics["prediction_latency_average_seconds"] == pytest.approx(
+        metrics["prediction_latency_total_seconds"] / 2
+    )
