@@ -89,8 +89,17 @@ def readiness_check(request: Request):
 
 @app.get("/metrics")
 def prediction_metrics(request: Request) -> dict[str, int | float]:
-    """Return process-local prediction counters."""
-    return request.app.state.prediction_metrics.copy()
+    """Return process-local prediction metrics."""
+    metrics = request.app.state.prediction_metrics.copy()
+    request_count = metrics["prediction_requests_total"]
+
+    metrics["prediction_latency_average_seconds"] = (
+        metrics["prediction_latency_total_seconds"] / request_count
+        if request_count > 0
+        else 0.0
+    )
+
+    return metrics
 
 
 @app.post("/predict")
