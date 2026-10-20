@@ -6,6 +6,8 @@ from contextlib import asynccontextmanager
 import pandas as pd
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
+from prometheus_client import CONTENT_TYPE_LATEST
+from starlette.responses import Response
 
 from backend.app.api.schemas import ChurnPredictionRequest
 from backend.app.config import settings
@@ -129,6 +131,89 @@ def prediction_metrics(request: Request) -> dict[str, int | float]:
         metrics["prediction_latency_p99_seconds"] = 0.0
 
     return metrics
+
+
+@app.get("/metrics/prometheus", include_in_schema=False)
+def prometheus_metrics(request: Request) -> Response:
+    """Expose prediction metrics in Prometheus text exposition format."""
+    metrics = prediction_metrics(request)
+
+    lines = [
+        "# HELP modelforge_prediction_requests_total Total prediction requests.",
+        "# TYPE modelforge_prediction_requests_total counter",
+        (
+            "modelforge_prediction_requests_total "
+            f"{metrics['prediction_requests_total']}"
+        ),
+        "# HELP modelforge_predictions_succeeded_total Successful predictions.",
+        "# TYPE modelforge_predictions_succeeded_total counter",
+        (
+            "modelforge_predictions_succeeded_total "
+            f"{metrics['predictions_succeeded_total']}"
+        ),
+        "# HELP modelforge_predictions_failed_total Failed predictions.",
+        "# TYPE modelforge_predictions_failed_total counter",
+        (f"modelforge_predictions_failed_total {metrics['predictions_failed_total']}"),
+        (
+            "# HELP modelforge_prediction_latency_total_seconds "
+            "Total prediction latency in seconds."
+        ),
+        "# TYPE modelforge_prediction_latency_total_seconds counter",
+        (
+            "modelforge_prediction_latency_total_seconds "
+            f"{metrics['prediction_latency_total_seconds']}"
+        ),
+        (
+            "# HELP modelforge_prediction_latency_max_seconds "
+            "Maximum observed prediction latency in seconds."
+        ),
+        "# TYPE modelforge_prediction_latency_max_seconds gauge",
+        (
+            "modelforge_prediction_latency_max_seconds "
+            f"{metrics['prediction_latency_max_seconds']}"
+        ),
+        (
+            "# HELP modelforge_prediction_latency_average_seconds "
+            "Average prediction latency in seconds."
+        ),
+        "# TYPE modelforge_prediction_latency_average_seconds gauge",
+        (
+            "modelforge_prediction_latency_average_seconds "
+            f"{metrics['prediction_latency_average_seconds']}"
+        ),
+        (
+            "# HELP modelforge_prediction_latency_p50_seconds "
+            "50th percentile of recent prediction latency."
+        ),
+        "# TYPE modelforge_prediction_latency_p50_seconds gauge",
+        (
+            "modelforge_prediction_latency_p50_seconds "
+            f"{metrics['prediction_latency_p50_seconds']}"
+        ),
+        (
+            "# HELP modelforge_prediction_latency_p95_seconds "
+            "95th percentile of recent prediction latency."
+        ),
+        "# TYPE modelforge_prediction_latency_p95_seconds gauge",
+        (
+            "modelforge_prediction_latency_p95_seconds "
+            f"{metrics['prediction_latency_p95_seconds']}"
+        ),
+        (
+            "# HELP modelforge_prediction_latency_p99_seconds "
+            "99th percentile of recent prediction latency."
+        ),
+        "# TYPE modelforge_prediction_latency_p99_seconds gauge",
+        (
+            "modelforge_prediction_latency_p99_seconds "
+            f"{metrics['prediction_latency_p99_seconds']}"
+        ),
+    ]
+
+    return Response(
+        content="\n".join(lines) + "\n",
+        media_type=CONTENT_TYPE_LATEST,
+    )
 
 
 @app.post("/predict")

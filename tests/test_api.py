@@ -488,3 +488,20 @@ def test_metrics_endpoint_reports_zero_latency_percentiles_without_requests():
     assert metrics["prediction_latency_p50_seconds"] == 0.0
     assert metrics["prediction_latency_p95_seconds"] == 0.0
     assert metrics["prediction_latency_p99_seconds"] == 0.0
+
+
+def test_prometheus_metrics_endpoint_exposes_prediction_metrics():
+    """Expose prediction metrics in Prometheus text format."""
+    with patch("backend.app.api.api.load_registered_model_by_alias") as mock_load:
+        mock_load.return_value.predict.return_value = [1]
+
+        with TestClient(app) as client:
+            response = client.get("/metrics/prometheus")
+
+    assert response.status_code == 200
+    assert "text/plain" in response.headers["content-type"]
+    assert "# TYPE modelforge_prediction_requests_total counter" in response.text
+    assert "# TYPE modelforge_prediction_latency_p95_seconds gauge" in response.text
+    assert "modelforge_prediction_requests_total 0" in response.text
+    assert "modelforge_predictions_succeeded_total 0" in response.text
+    assert "modelforge_predictions_failed_total 0" in response.text
