@@ -1,6 +1,7 @@
 import logging
 from unittest.mock import patch
 
+import pandas as pd
 import pytest
 from fastapi.testclient import TestClient
 
@@ -505,3 +506,196 @@ def test_prometheus_metrics_endpoint_exposes_prediction_metrics():
     assert "modelforge_prediction_requests_total 0" in response.text
     assert "modelforge_predictions_succeeded_total 0" in response.text
     assert "modelforge_predictions_failed_total 0" in response.text
+
+
+@patch("backend.app.api.api.load_registered_model_by_alias")
+def test_drift_endpoint_returns_report(mock_load_model, tmp_path):
+    """Return a drift report when valid reference data is available."""
+    mock_load_model.return_value.predict.return_value = [0]
+
+    reference = pd.DataFrame(
+        {
+            "age": list(range(20, 40)),
+            "tenure": list(range(1, 21)),
+            "monthly_charges": [50.0 + i for i in range(20)],
+            "contract_type": ["monthly", "annual"] * 10,
+            "support_tickets": list(range(20)),
+        }
+    )
+    reference_path = tmp_path / "reference.csv"
+    reference.to_csv(reference_path, index=False)
+
+    records = reference.iloc[:10].to_dict(orient="records")
+
+    with (
+        patch("backend.app.api.api.settings.drift_reference_path", str(reference_path)),
+        patch("backend.app.api.api.settings.drift_min_samples", 10),
+        TestClient(app) as client,
+    ):
+        response = client.post(
+            "/monitoring/drift",
+            json={"records": records},
+        )
+
+    assert response.status_code == 200
+    report = response.json()
+    assert report["status"] in {"stable", "drift_detected"}
+    assert report["reference_samples"] == 20
+    assert report["current_samples"] == 10
+    assert set(report["features"]) == {
+        "age",
+        "tenure",
+        "monthly_charges",
+        "contract_type",
+        "support_tickets",
+    }
+
+
+@patch("backend.app.api.api.load_registered_model_by_alias")
+def test_drift_endpoint_reports_insufficient_data(mock_load_model, tmp_path):
+    """Report insufficient data instead of claiming stability."""
+    mock_load_model.return_value.predict.return_value = [0]
+
+    reference = pd.DataFrame(
+        {
+            "age": list(range(20, 40)),
+            "tenure": list(range(1, 21)),
+            "monthly_charges": [50.0 + i for i in range(20)],
+            "contract_type": ["monthly", "annual"] * 10,
+            "support_tickets": list(range(20)),
+        }
+    )
+    reference_path = tmp_path / "reference.csv"
+    reference.to_csv(reference_path, index=False)
+
+    records = reference.iloc[:5].to_dict(orient="records")
+
+    with (
+        patch("backend.app.api.api.settings.drift_reference_path", str(reference_path)),
+        patch("backend.app.api.api.settings.drift_min_samples", 10),
+        TestClient(app) as client,
+    ):
+        response = client.post(
+            "/monitoring/drift",
+            json={"records": records},
+        )
+
+    assert response.status_code == 200
+    report = response.json()
+    assert report["status"] == "insufficient_data"
+    assert report["drift_detected"] is None
+    assert report["current_samples"] == 5
+    assert report["features"] == {}
+
+
+@patch("backend.app.api.api.load_registered_model_by_alias")
+def test_drift_endpoint_returns_503_when_reference_is_missing(
+    mock_load_model,
+    tmp_path,
+):
+    """Return a safe error when the reference dataset cannot be loaded."""
+    mock_load_model.return_value.predict.return_value = [0]
+
+    missing_path = tmp_path / "missing.csv"
+    records = [
+        {
+            "age": 35,
+            "tenure": 12,
+            "monthly_charges": 75.0,
+            "contract_type": "monthly",
+            "support_tickets": 2,
+        }
+    ]
+
+    with (
+        patch(
+            "backend.app.api.api.settings.drift_reference_path",
+            str(missing_path),
+        ),
+        TestClient(app) as client,
+    ):
+        response = client.post(
+            "/monitoring/drift",
+            json={"records": records},
+        )
+
+    assert response.status_code == 503
+    assert response.json() == {
+        "detail": "Drift monitoring reference data is unavailable."
+    }
+
+
+@patch("backend.app.api.api.load_registered_model_by_alias")
+def test_drift_endpoint_rejects_empty_batch(mock_load_model):
+    """Reject a batch that contains no customer records."""
+    mock_load_model.return_value.predict.return_value = [0]
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/monitoring/drift",
+            json={"records": []},
+        )
+
+    assert response.status_code == 422
+
+
+@patch("backend.app.api.api.load_registered_model_by_alias")
+def test_drift_endpoint_rejects_invalid_record(mock_load_model):
+    """Reject records that violate the customer feature schema."""
+    mock_load_model.return_value.predict.return_value = [0]
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/monitoring/drift",
+            json={
+                "records": [
+                    {
+                        "age": 17,
+                        "tenure": 12,
+                        "monthly_charges": 75.0,
+                        "contract_type": "monthly",
+                        "support_tickets": 2,
+                    }
+                ]
+            },
+        )
+
+    assert response.status_code == 422
+
+
+@patch("backend.app.api.api.load_registered_model_by_alias")
+def test_drift_endpoint_returns_503_when_reference_is_invalid(
+    mock_load_model,
+    tmp_path,
+):
+    """Reject and avoid caching a reference dataset with missing features."""
+    mock_load_model.return_value.predict.return_value = [0]
+
+    invalid_path = tmp_path / "invalid.csv"
+    pd.DataFrame({"age": [25, 30, 35]}).to_csv(invalid_path, index=False)
+
+    records = [
+        {
+            "age": 35,
+            "tenure": 12,
+            "monthly_charges": 75.0,
+            "contract_type": "monthly",
+            "support_tickets": 2,
+        }
+    ]
+
+    with (
+        patch(
+            "backend.app.api.api.settings.drift_reference_path",
+            str(invalid_path),
+        ),
+        TestClient(app) as client,
+    ):
+        response = client.post(
+            "/monitoring/drift",
+            json={"records": records},
+        )
+
+    assert response.status_code == 503
+    assert response.json() == {"detail": "Drift monitoring reference data is invalid."}
+    assert getattr(app.state, "drift_reference_path", None) != str(invalid_path)
