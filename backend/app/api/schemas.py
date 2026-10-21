@@ -13,3 +13,12 @@ class ChurnPredictionRequest(BaseModel):
         str, StringConstraints(strip_whitespace=True, min_length=1)
     ]
     support_tickets: int = Field(ge=0)
+
+
+class DriftBatchRequest(BaseModel):
+    """Customer feature records used for batch drift detection."""
+
+    records: list[ChurnPredictionRequest] = Field(
+        min_length=1,
+        max_length=10_000,
+    )

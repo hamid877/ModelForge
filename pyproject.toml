@@ -16,6 +16,7 @@ dependencies = [
     "scikit-learn>=1.9.1",
     "uvicorn[standard]>=0.54.0",
     "prometheus-client>=0.22.0",
+    "scipy>=1.18.1",
 ]
 
 [tool.uv]

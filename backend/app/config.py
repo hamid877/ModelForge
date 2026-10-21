@@ -18,6 +18,12 @@ class Settings(BaseSettings):
         default="champion",
         min_length=1,
     )
+    drift_reference_path: str = Field(
+        default="data/raw/churn.csv",
+        min_length=1,
+    )
+    drift_min_samples: int = Field(default=10, ge=2)
+    drift_p_value_threshold: float = Field(default=0.05, gt=0, lt=1)
 
 
 settings = Settings()
