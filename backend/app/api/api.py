@@ -2,6 +2,7 @@ import logging
 import time
 from collections import deque
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 import pandas as pd
 from fastapi import FastAPI, HTTPException, Request
@@ -9,8 +10,9 @@ from fastapi.responses import JSONResponse
 from prometheus_client import CONTENT_TYPE_LATEST
 from starlette.responses import Response
 
-from backend.app.api.schemas import ChurnPredictionRequest
+from backend.app.api.schemas import ChurnPredictionRequest, DriftBatchRequest
 from backend.app.config import settings
+from backend.app.ml.drift import detect_data_drift
 from backend.app.ml.registry import load_registered_model_by_alias
 
 logger = logging.getLogger(__name__)
@@ -270,3 +272,60 @@ def predict_churn(
             elapsed,
         )
         api_request.app.state.prediction_latency_samples.append(elapsed)
+
+
+@app.post("/monitoring/drift")
+def monitor_data_drift(
+    batch: DriftBatchRequest,
+    api_request: Request,
+) -> dict:
+    """Compare a customer batch with the configured reference dataset."""
+    reference_path = Path(settings.drift_reference_path)
+    cached_path = getattr(api_request.app.state, "drift_reference_path", None)
+    reference = getattr(api_request.app.state, "drift_reference", None)
+
+    if reference is None or cached_path != str(reference_path):
+        try:
+            reference = pd.read_csv(reference_path)
+        except (OSError, ValueError, pd.errors.ParserError, UnicodeDecodeError):
+            logger.exception("drift_reference_load_failed")
+            raise HTTPException(
+                status_code=503,
+                detail="Drift monitoring reference data is unavailable.",
+            ) from None
+
+        # Validate the reference before caching it. An invalid reference is
+        # a server-side data problem, not a client request problem.
+        try:
+            current = pd.DataFrame([record.model_dump() for record in batch.records])
+            detect_data_drift(
+                reference,
+                current,
+                min_samples=settings.drift_min_samples,
+                p_value_threshold=settings.drift_p_value_threshold,
+            )
+        except ValueError:
+            logger.exception("drift_reference_validation_failed")
+            raise HTTPException(
+                status_code=503,
+                detail="Drift monitoring reference data is invalid.",
+            ) from None
+
+        api_request.app.state.drift_reference = reference
+        api_request.app.state.drift_reference_path = str(reference_path)
+
+    current = pd.DataFrame([record.model_dump() for record in batch.records])
+
+    try:
+        return detect_data_drift(
+            reference,
+            current,
+            min_samples=settings.drift_min_samples,
+            p_value_threshold=settings.drift_p_value_threshold,
+        )
+    except ValueError:
+        logger.exception("drift_detection_failed")
+        raise HTTPException(
+            status_code=422,
+            detail="Drift detection could not process the supplied datasets.",
+        ) from None

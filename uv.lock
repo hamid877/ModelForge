@@ -1447,6 +1447,7 @@ dependencies = [
     { name = "prometheus-client" },
     { name = "pydantic-settings" },
     { name = "scikit-learn" },
+    { name = "scipy" },
     { name = "uvicorn", extra = ["standard"] },
 ]
 
@@ -1466,6 +1467,7 @@ requires-dist = [
     { name = "prometheus-client", specifier = ">=0.22.0" },
     { name = "pydantic-settings", specifier = ">=2.15.0" },
     { name = "scikit-learn", specifier = ">=1.9.1" },
+    { name = "scipy", specifier = ">=1.18.1" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.54.0" },
 ]
 
