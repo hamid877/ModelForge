@@ -18,6 +18,11 @@ class Settings(BaseSettings):
         default="champion",
         min_length=1,
     )
+    promotion_minimum_f1: float = Field(
+        default=0.70,
+        ge=0.0,
+        le=1.0,
+    )
     drift_reference_path: str = Field(
         default="data/raw/churn.csv",
         min_length=1,
