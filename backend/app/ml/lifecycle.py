@@ -76,11 +76,7 @@ def run_drift_aware_lifecycle(
         decision.approved,
         decision.reason,
         decision.candidate_f1,
-        (
-            f"{decision.champion_f1:.4f}"
-            if decision.champion_f1 is not None
-            else "none"
-        ),
+        (f"{decision.champion_f1:.4f}" if decision.champion_f1 is not None else "none"),
     )
 
     _record_audit(result)

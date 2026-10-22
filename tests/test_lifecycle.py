@@ -347,9 +347,9 @@ def test_promoted_lifecycle_persists_promotion_details(sample_data, tmp_path):
     assert result["status"] == "promoted"
 
     with sqlite3.connect(database_path) as connection:
-        payload = connection.execute(
-            "SELECT payload FROM lifecycle_audit"
-        ).fetchone()[0]
+        payload = connection.execute("SELECT payload FROM lifecycle_audit").fetchone()[
+            0
+        ]
 
     record = json.loads(payload)
     assert record["promotion"]["approved"] is True

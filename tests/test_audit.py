@@ -58,8 +58,6 @@ def test_each_lifecycle_record_has_unique_id(tmp_path):
     assert first["run_id"] != second["run_id"]
 
     with sqlite3.connect(database_path) as connection:
-        count = connection.execute(
-            "SELECT COUNT(*) FROM lifecycle_audit"
-        ).fetchone()[0]
+        count = connection.execute("SELECT COUNT(*) FROM lifecycle_audit").fetchone()[0]
 
     assert count == 2
