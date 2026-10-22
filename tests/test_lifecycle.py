@@ -266,3 +266,137 @@ def test_training_failure_is_logged_and_propagated(sample_data, tmp_path, caplog
         )
 
     assert "lifecycle_training_failed" in caplog.text
+
+
+def test_stable_lifecycle_persists_audit_record(sample_data, tmp_path):
+    import json
+    import sqlite3
+
+    from backend.app.config import settings
+
+    drift_result = {
+        "status": "stable",
+        "retraining_recommended": False,
+        "reason": "no_feature_drift_detected",
+        "drift_report": {"drift_detected": False},
+    }
+    database_path = tmp_path / "audit.db"
+
+    with (
+        patch.object(settings, "lifecycle_audit_db_path", str(database_path)),
+        patch(
+            "backend.app.ml.lifecycle.assess_retraining_need",
+            return_value=drift_result,
+        ),
+    ):
+        result = run_drift_aware_lifecycle(
+            sample_data,
+            sample_data.copy(),
+            tmp_path / "candidate.joblib",
+        )
+
+    assert result["status"] == "stable"
+
+    with sqlite3.connect(database_path) as connection:
+        row = connection.execute(
+            "SELECT status, payload FROM lifecycle_audit"
+        ).fetchone()
+
+    assert row is not None
+    assert row[0] == "stable"
+    assert json.loads(row[1])["reason"] == "no_feature_drift_detected"
+
+
+def test_promoted_lifecycle_persists_promotion_details(sample_data, tmp_path):
+    import json
+    import sqlite3
+
+    from backend.app.config import settings
+
+    drift_result = {
+        "status": "retraining_recommended",
+        "retraining_recommended": True,
+        "reason": "feature_drift_detected",
+        "drift_report": {"drift_detected": True},
+    }
+    decision = PromotionDecision(
+        approved=True,
+        reason="candidate_meets_quality_gate",
+        candidate_f1=0.85,
+        champion_f1=0.8,
+    )
+    database_path = tmp_path / "audit.db"
+
+    with (
+        patch.object(settings, "lifecycle_audit_db_path", str(database_path)),
+        patch(
+            "backend.app.ml.lifecycle.assess_retraining_need",
+            return_value=drift_result,
+        ),
+        patch(
+            "backend.app.ml.lifecycle.run_training_and_promote",
+            return_value=({"f1_score": 0.85}, decision),
+        ),
+    ):
+        result = run_drift_aware_lifecycle(
+            sample_data,
+            sample_data.copy(),
+            tmp_path / "candidate.joblib",
+        )
+
+    assert result["status"] == "promoted"
+
+    with sqlite3.connect(database_path) as connection:
+        payload = connection.execute("SELECT payload FROM lifecycle_audit").fetchone()[
+            0
+        ]
+
+    record = json.loads(payload)
+    assert record["promotion"]["approved"] is True
+    assert record["promotion"]["candidate_f1"] == 0.85
+    assert record["promotion"]["champion_f1"] == 0.8
+
+
+def test_training_failure_persists_failure_record(sample_data, tmp_path):
+    import json
+    import sqlite3
+
+    from backend.app.config import settings
+
+    drift_result = {
+        "status": "retraining_recommended",
+        "retraining_recommended": True,
+        "reason": "feature_drift_detected",
+        "drift_report": {"drift_detected": True},
+    }
+    database_path = tmp_path / "audit.db"
+
+    with (
+        patch.object(settings, "lifecycle_audit_db_path", str(database_path)),
+        patch(
+            "backend.app.ml.lifecycle.assess_retraining_need",
+            return_value=drift_result,
+        ),
+        patch(
+            "backend.app.ml.lifecycle.run_training_and_promote",
+            side_effect=RuntimeError("training failed"),
+        ),
+        pytest.raises(RuntimeError, match="training failed"),
+    ):
+        run_drift_aware_lifecycle(
+            sample_data,
+            sample_data.copy(),
+            tmp_path / "candidate.joblib",
+        )
+
+    with sqlite3.connect(database_path) as connection:
+        row = connection.execute(
+            "SELECT status, payload FROM lifecycle_audit"
+        ).fetchone()
+
+    assert row is not None
+    assert row[0] == "training_failed"
+    record = json.loads(row[1])
+    assert record["failure"]["type"] == "RuntimeError"
+    assert "message" not in record["failure"]
+    assert "training failed" not in row[1]
