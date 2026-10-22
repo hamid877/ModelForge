@@ -48,3 +48,5 @@ Thumbs.db
 mlflow.db
 mlruns/
 .docker-data/
+
+data/lifecycle_audit.db
