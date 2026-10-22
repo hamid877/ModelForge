@@ -1,3 +1,4 @@
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -5,6 +6,8 @@ import pandas as pd
 
 from backend.app.ml.retraining import assess_retraining_need
 from backend.app.ml.workflow import run_training_and_promote
+
+logger = logging.getLogger(__name__)
 
 
 def run_drift_aware_lifecycle(
@@ -22,13 +25,27 @@ def run_drift_aware_lifecycle(
         "drift_report": assessment["drift_report"],
     }
 
+    logger.info(
+        "lifecycle_assessment_completed status=%s reason=%s retraining_recommended=%s",
+        assessment["status"],
+        assessment["reason"],
+        assessment["retraining_recommended"],
+    )
+
     if not assessment["retraining_recommended"]:
         return result
 
-    metrics, decision = run_training_and_promote(
-        current,
-        model_path,
-    )
+    try:
+        metrics, decision = run_training_and_promote(
+            current,
+            model_path,
+        )
+    except Exception:
+        logger.exception(
+            "lifecycle_training_failed reason=%s",
+            assessment["reason"],
+        )
+        raise
 
     result["training_attempted"] = True
     result["metrics"] = metrics
@@ -39,5 +56,15 @@ def run_drift_aware_lifecycle(
         "champion_f1": decision.champion_f1,
     }
     result["status"] = "promoted" if decision.approved else "promotion_rejected"
+
+    logger.info(
+        "lifecycle_promotion_completed status=%s approved=%s "
+        "reason=%s candidate_f1=%.4f champion_f1=%s",
+        result["status"],
+        decision.approved,
+        decision.reason,
+        decision.candidate_f1,
+        (f"{decision.champion_f1:.4f}" if decision.champion_f1 is not None else "none"),
+    )
 
     return result
