@@ -30,5 +30,10 @@ class Settings(BaseSettings):
     drift_min_samples: int = Field(default=10, ge=2)
     drift_p_value_threshold: float = Field(default=0.05, gt=0, lt=1)
 
+    lifecycle_audit_db_path: str = Field(
+        default="data/lifecycle_audit.db",
+        min_length=1,
+    )
+
 
 settings = Settings()
