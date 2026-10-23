@@ -50,3 +50,6 @@ mlruns/
 .docker-data/
 
 data/lifecycle_audit.db
+
+# Local recovery snapshots
+backups/
