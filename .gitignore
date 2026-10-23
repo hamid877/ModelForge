@@ -53,3 +53,6 @@ data/lifecycle_audit.db
 
 # Local recovery snapshots
 backups/
+
+# Keep the safe environment template in Git
+!.env.example
