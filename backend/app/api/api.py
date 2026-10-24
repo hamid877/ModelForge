@@ -14,6 +14,7 @@ from backend.app.api.schemas import ChurnPredictionRequest, DriftBatchRequest
 from backend.app.config import settings
 from backend.app.ml.drift import detect_data_drift
 from backend.app.ml.registry import load_registered_model_by_alias
+from backend.app.ml.tracking import setup_mlflow
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +35,7 @@ async def lifespan(app: FastAPI):
         settings.model_name,
         settings.model_alias,
     )
+    setup_mlflow()
 
     try:
         app.state.churn_model = load_registered_model_by_alias(

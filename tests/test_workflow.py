@@ -1,3 +1,4 @@
+from contextlib import nullcontext
 from pathlib import Path
 from unittest.mock import patch
 
@@ -14,7 +15,18 @@ def test_run_training(tmp_path: Path):
     df = load_and_validate_churn_data(DATA_PATH)
     model_path = tmp_path / "churn_model.joblib"
 
-    metrics = run_training(df, model_path)
+    with (
+        patch("backend.app.ml.workflow.setup_mlflow"),
+        patch(
+            "backend.app.ml.workflow.mlflow.start_run",
+            return_value=nullcontext(),
+        ),
+        patch("backend.app.ml.workflow.mlflow.set_tag"),
+        patch("backend.app.ml.workflow.mlflow.log_param"),
+        patch("backend.app.ml.workflow.mlflow.log_metric"),
+        patch("backend.app.ml.workflow.mlflow.log_artifact"),
+    ):
+        metrics = run_training(df, model_path)
 
     assert model_path.exists()
     assert 0.0 <= metrics["accuracy"] <= 1.0
@@ -26,6 +38,7 @@ def test_run_training_and_promote_promotes_registered_candidate(
 ):
     df = load_and_validate_churn_data(DATA_PATH)
     model_path = tmp_path / "candidate.joblib"
+
     decision = PromotionDecision(
         approved=True,
         reason="candidate_meets_quality_gate",
@@ -43,6 +56,15 @@ def test_run_training_and_promote_promotes_registered_candidate(
             "backend.app.ml.workflow.promote_model",
             return_value=decision,
         ) as promote,
+        patch("backend.app.ml.workflow.setup_mlflow"),
+        patch(
+            "backend.app.ml.workflow.mlflow.start_run",
+            return_value=nullcontext(),
+        ),
+        patch("backend.app.ml.workflow.mlflow.set_tag"),
+        patch("backend.app.ml.workflow.mlflow.log_param"),
+        patch("backend.app.ml.workflow.mlflow.log_metric"),
+        patch("backend.app.ml.workflow.mlflow.log_artifact"),
     ):
         metrics, result = run_training_and_promote(df, model_path)
 
@@ -69,6 +91,15 @@ def test_run_training_and_promote_fails_if_version_is_missing(
         ),
         patch("backend.app.ml.workflow.promote_model") as promote,
         pytest.raises(RuntimeError, match="did not return a registered model version"),
+        patch("backend.app.ml.workflow.setup_mlflow"),
+        patch(
+            "backend.app.ml.workflow.mlflow.start_run",
+            return_value=nullcontext(),
+        ),
+        patch("backend.app.ml.workflow.mlflow.set_tag"),
+        patch("backend.app.ml.workflow.mlflow.log_param"),
+        patch("backend.app.ml.workflow.mlflow.log_metric"),
+        patch("backend.app.ml.workflow.mlflow.log_artifact"),
     ):
         run_training_and_promote(df, model_path)
 
@@ -97,6 +128,15 @@ def test_run_training_and_promote_returns_rejection_without_changing_alias(
             "backend.app.ml.workflow.promote_model",
             return_value=decision,
         ) as promote,
+        patch("backend.app.ml.workflow.setup_mlflow"),
+        patch(
+            "backend.app.ml.workflow.mlflow.start_run",
+            return_value=nullcontext(),
+        ),
+        patch("backend.app.ml.workflow.mlflow.set_tag"),
+        patch("backend.app.ml.workflow.mlflow.log_param"),
+        patch("backend.app.ml.workflow.mlflow.log_metric"),
+        patch("backend.app.ml.workflow.mlflow.log_artifact"),
     ):
         metrics, result = run_training_and_promote(df, model_path)
 

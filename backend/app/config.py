@@ -18,6 +18,10 @@ class Settings(BaseSettings):
         default="champion",
         min_length=1,
     )
+    mlflow_tracking_uri: str = Field(
+        default="http://127.0.0.1:5001",
+        min_length=1,
+    )
     promotion_minimum_f1: float = Field(
         default=0.70,
         ge=0.0,

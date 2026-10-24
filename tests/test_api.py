@@ -5,7 +5,14 @@ import pandas as pd
 import pytest
 from fastapi.testclient import TestClient
 
-from backend.app.api.api import app
+from backend.app.api import api as api_module
+
+app = api_module.app
+
+
+@pytest.fixture(autouse=True)
+def mock_mlflow_setup(monkeypatch):
+    monkeypatch.setattr(api_module, "setup_mlflow", lambda: None)
 
 
 @patch("backend.app.api.api.load_registered_model_by_alias")
