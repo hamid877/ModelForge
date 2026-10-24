@@ -39,10 +39,15 @@ jobs:
         run: uv run ruff format --check .
 
       
-      - name: Diagnose pytest hang
-        timeout-minutes: 2
-        env:
-          PYTHONFAULTHANDLER: "1"
-        run: |
-          timeout -s SIGABRT 60s uv run pytest -vv -s --tb=short -o faulthandler_timeout=30
+      
+      - name: Test API
+        timeout-minutes: 1
+        run: uv run pytest -vv -s tests/test_api.py --tb=short
 
+      - name: Test core modules
+        timeout-minutes: 1
+        run: uv run pytest -vv -s tests/test_config.py tests/test_data_loader.py tests/test_data_pipeline.py tests/test_data_validator.py tests/test_drift.py --tb=short
+
+      - name: Test MLflow and workflow
+        timeout-minutes: 1
+        run: uv run pytest -vv -s tests/test_registry.py tests/test_tracking.py tests/test_workflow.py tests/test_lifecycle.py --tb=short
