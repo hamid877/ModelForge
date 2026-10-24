@@ -38,6 +38,10 @@ jobs:
       - name: Ruff format check
         run: uv run ruff format --check .
 
+      - name: Diagnose test collection
+        timeout-minutes: 1
+        run: uv run pytest --collect-only -vv
+
       - name: Run tests
         timeout-minutes: 2
         run: uv run pytest -vv -s --tb=short
