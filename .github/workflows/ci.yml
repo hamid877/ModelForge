@@ -38,16 +38,11 @@ jobs:
       - name: Ruff format check
         run: uv run ruff format --check .
 
-      - name: Diagnose test collection
-        timeout-minutes: 1
-        run: uv run pytest --collect-only -vv
-
       
-      - name: Run tests without capture
+      - name: Diagnose pytest hang
         timeout-minutes: 2
-        run: uv run pytest -vv -s --tb=short -o faulthandler_timeout=30
+        env:
+          PYTHONFAULTHANDLER: "1"
+        run: |
+          timeout -s SIGABRT 60s uv run pytest -vv -s --tb=short -o faulthandler_timeout=30
 
-      - name: Run tests with one worker
-        if: always()
-        timeout-minutes: 2
-        run: uv run pytest -vv -s --tb=short -o faulthandler_timeout=30 -x
