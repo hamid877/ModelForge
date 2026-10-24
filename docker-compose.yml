@@ -2,6 +2,7 @@
 services:
   mlflow:
     image: modelforge-api:dev
+    user: "1000:1000"
     command:
       - uv
       - run
@@ -31,6 +32,7 @@ services:
 
   api:
     image: modelforge-api:dev
+    user: "1000:1000"
     environment:
       MODELFORGE_MODEL_NAME: churn-classifier
       MODELFORGE_MODEL_ALIAS: champion
