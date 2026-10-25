@@ -11,6 +11,9 @@ services:
       - server
       - --backend-store-uri
       - sqlite:////mlflow-data/mlflow.db
+      - --artifacts-destination
+      - /mlruns
+      - --serve-artifacts
       - --host
       - 0.0.0.0
       - --port
@@ -19,7 +22,7 @@ services:
       - "mlflow:5000,localhost:5001,localhost:5000,127.0.0.1:*"
     volumes:
       - ./mlflow-data:/mlflow-data
-      - ./mlruns:/home/hamid/Documents/project/ModelForge/mlruns
+      - ./mlruns:/mlruns
     ports:
       - "127.0.0.1:5001:5000"
     healthcheck:
@@ -38,7 +41,7 @@ services:
       MODELFORGE_MODEL_ALIAS: champion
       MODELFORGE_MLFLOW_TRACKING_URI: http://mlflow:5000
     volumes:
-      - ./mlruns:/home/hamid/Documents/project/ModelForge/mlruns
+      - ./mlruns:/mlruns
       - ./data:/app/data
     ports:
       - "127.0.0.1:8000:8000"
