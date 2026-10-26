@@ -46,6 +46,7 @@ Thumbs.db
 
 # MLflow
 mlflow.db
+mlflow-data/
 mlruns/
 .docker-data/
 
