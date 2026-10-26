@@ -3,7 +3,12 @@ import logging
 import sys
 from pathlib import Path
 
-from backend.app.ml.bootstrap import (
+# Ensure repository root is on sys.path when executed directly as a script
+_repo_root = Path(__file__).resolve().parent.parent
+if str(_repo_root) not in sys.path:
+    sys.path.insert(0, str(_repo_root))
+
+from backend.app.ml.bootstrap import (  # noqa: E402
     DEFAULT_DATA_PATH,
     DEFAULT_MODEL_PATH,
     bootstrap_model,
