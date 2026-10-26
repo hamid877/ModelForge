@@ -12,7 +12,7 @@ This document outlines the milestones established during the AI Engineering audi
 | **Milestone 2** | Fix Docker Compose Portability | Completed | Removed host-specific paths (`/home/hamid/...`) from `docker-compose.yml`, standardizing volume mounts on portable `./mlruns` and `./mlflow-data`. |
 | **Milestone 3** | Fresh-Clone Bootstrap Workflow | Completed | Created idempotent bootstrap workflow (`scripts/bootstrap.py` and `backend/app/ml/bootstrap.py`) to initialize MLflow, train/register initial candidate, and assign the `champion` alias. |
 | **Milestone 4** | Platform Documentation & Guides | Completed | Authored `docs/SETUP.md`, `docs/DEPLOYMENT.md`, and `docs/TROUBLESHOOTING.md`; condensed README to link to guides; updated ROADMAP.md. All commands, paths, and env vars verified against source. |
-| **Milestone 5** | Resolve Starlette Deprecation Warning | Pending | Upgrade HTTP client tooling (`httpx` / `httpx2`) to eliminate StarletteDeprecationWarning on test execution. |
+| **Milestone 5** | Resolve Starlette Deprecation Warning | Completed | Migrated dev HTTP client tooling to `httpx2>=2.16.0` to eliminate StarletteDeprecationWarning during pytest execution. |
 | **Milestone 6** | Final Engineering Audit & Verification | Pending | Perform complete end-to-end clean-environment deployment audit and generate final sign-off report. |
 
 ---
@@ -60,3 +60,19 @@ Provide accurate, verifiable documentation for setup, deployment, and troublesho
 - **Updated `ROADMAP.md`**:
   - Milestone 4 row updated from Pending to Completed with accurate description.
   - This detailed scope section added.
+
+---
+
+## Detailed Milestone Scope: Milestone 5 (Resolve Starlette Deprecation Warning)
+
+### Objective
+Eliminate the `StarletteDeprecationWarning` emitted during pytest execution by migrating the development HTTP client dependency to `httpx2`, ensuring full compatibility with Starlette 1.7.0 while maintaining zero test warnings and clean test passes.
+
+### Key Deliverables
+- **Dev Dependency Migration (`pyproject.toml`, `uv.lock`)**:
+  - Replaced `httpx>=0.28.1` with `httpx2>=2.16.0` under `[dependency-groups] dev`.
+  - Regenerated `uv.lock` via `uv sync`, cleanly swapping `httpx`/`httpcore` for `httpx2`/`httpcore2`/`truststore`.
+- **Zero-Warning Test Suite Verification**:
+  - Verified 110/110 tests pass cleanly with 0 warnings on `uv run pytest tests/ -q --tb=short` and `uv run pytest`.
+  - Confirmed `uv run ruff check .` and `uv run ruff format --check .` pass.
+  - Confirmed `git diff --check` passes cleanly without formatting or whitespace issues.
