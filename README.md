@@ -13,96 +13,33 @@ ModelForge is an end-to-end machine learning platform for customer churn predict
 
 ---
 
-## Quickstart: Fresh-Clone Setup
+## Quickstart
 
-Follow these steps to set up and run ModelForge on a fresh machine or clean clone.
+See **[docs/SETUP.md](docs/SETUP.md)** for the complete step-by-step guide covering:
 
-### 1. Prerequisites
+1. Prerequisites (Python 3.12, `uv`, Docker Compose v2)
+2. Environment configuration (`.env`)
+3. Installing dependencies (`uv sync`)
+4. Building the Docker image
+5. Starting MLflow and bootstrapping the champion model
+6. Launching the full stack
+7. Health and readiness checks
+8. Running tests and linters
+9. Shutdown
 
-- Python 3.12+
-- [`uv`](https://docs.astral.sh/uv/) package manager
-- Docker and Docker Compose
+---
 
-### 2. Environment Configuration
+## Documentation
 
-Clone the repository and create your local environment file:
-
-```bash
-git clone https://github.com/hamid877/ModelForge.git
-cd ModelForge
-cp .env.example .env
-```
-
-Set the required Grafana credentials in `.env`:
-```env
-GRAFANA_ADMIN_USER=admin
-GRAFANA_ADMIN_PASSWORD=your_secure_password
-```
-
-### 3. Install Dependencies
-
-Sync virtual environment and lockfile dependencies:
-
-```bash
-uv sync
-```
-
-### 4. Start MLflow & Bootstrap the Champion Model
-
-ModelForge requires an active champion model in the MLflow Model Registry for the API to pass readiness checks (`/ready`).
-
-Start the MLflow server:
-
-```bash
-docker compose up -d mlflow
-```
-
-Run the idempotent bootstrap workflow:
-
-```bash
-make bootstrap
-# or directly:
-uv run python scripts/bootstrap.py
-```
-
-The bootstrap script will:
-1. Connect to MLflow and check if a champion model exists.
-2. Train a baseline churn classification model on `data/raw/churn.csv`.
-3. Evaluate the model against the quality gate (F1 >= 0.70).
-4. Register the model under `churn-classifier` and assign the `champion` alias.
-
-*(Note: Re-running `make bootstrap` is safe and idempotent; it detects existing champions and skips retraining unless `--force` is provided.)*
-
-### 5. Launch the Full Stack
-
-Start the remaining services (API, Prometheus, Grafana):
-
-```bash
-make up
-# or: docker compose up -d
-```
-
-Verify service status:
-
-```bash
-curl http://127.0.0.1:8000/health
-# {"status":"healthy"}
-
-curl http://127.0.0.1:8000/ready
-# {"status":"ready"}
-```
-
-Access local endpoints:
-- **API Service**: [http://localhost:8000](http://localhost:8000) (Swagger Docs at `/docs`)
-- **MLflow Tracking**: [http://localhost:5001](http://localhost:5001)
-- **Prometheus**: [http://localhost:9090](http://localhost:9090)
-- **Grafana**: [http://localhost:3000](http://localhost:3000)
+| Guide | Contents |
+|---|---|
+| [docs/SETUP.md](docs/SETUP.md) | Local development setup, bootstrap workflow, tests |
+| [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) | Service architecture, ports, env vars, volumes, security |
+| [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | Common errors, diagnostic commands, fixes |
 
 ---
 
 ## Developer Commands
-
-ModelForge includes a `Makefile` with common tasks:
 
 | Command | Action |
 |---|---|
@@ -112,21 +49,6 @@ ModelForge includes a `Makefile` with common tasks:
 | `make format` | Check code formatting compliance |
 | `make up` | Start Docker Compose stack in detached mode |
 | `make down` | Stop and tear down Docker Compose services |
-
----
-
-## Testing & Quality
-
-Run tests and linters locally:
-
-```bash
-# Run tests
-uv run pytest tests/ -q
-
-# Check linting and formatting
-uv run ruff check .
-uv run ruff format --check .
-```
 
 ---
 
