@@ -13,7 +13,7 @@ This document outlines the milestones established during the AI Engineering audi
 | **Milestone 3** | Fresh-Clone Bootstrap Workflow | Completed | Created idempotent bootstrap workflow (`scripts/bootstrap.py` and `backend/app/ml/bootstrap.py`) to initialize MLflow, train/register initial candidate, and assign the `champion` alias. |
 | **Milestone 4** | Platform Documentation & Guides | Completed | Authored `docs/SETUP.md`, `docs/DEPLOYMENT.md`, and `docs/TROUBLESHOOTING.md`; condensed README to link to guides; updated ROADMAP.md. All commands, paths, and env vars verified against source. |
 | **Milestone 5** | Resolve Starlette Deprecation Warning | Completed | Migrated dev HTTP client tooling to `httpx2>=2.16.0` to eliminate StarletteDeprecationWarning during pytest execution. |
-| **Milestone 6** | Final Engineering Audit & Verification | Pending | Perform complete end-to-end clean-environment deployment audit and generate final sign-off report. |
+| **Milestone 6** | Final Engineering Audit & Verification | Completed | Performed evidence-based end-to-end audit, clean-clone reproducibility in isolated worktree, service persistence validation, CLI bootstrap fix, and produced final engineering sign-off report. |
 
 ---
 
@@ -76,3 +76,29 @@ Eliminate the `StarletteDeprecationWarning` emitted during pytest execution by m
   - Verified 110/110 tests pass cleanly with 0 warnings on `uv run pytest tests/ -q --tb=short` and `uv run pytest`.
   - Confirmed `uv run ruff check .` and `uv run ruff format --check .` pass.
   - Confirmed `git diff --check` passes cleanly without formatting or whitespace issues.
+
+---
+
+## Detailed Milestone Scope: Milestone 6 (Final Engineering Audit & Sign-off)
+
+### Objective
+Perform an evidence-based, end-to-end engineering audit from a clean environment, validate full stack container orchestration, MLflow tracking and promotion, real-time prediction serving, Prometheus and Grafana observability pipelines, verify state persistence across restarts, address identified edge-case defects, and generate the final sign-off report.
+
+### Key Deliverables
+- **Isolated Clean-Environment Validation**:
+  - Created an isolated worktree at `HEAD`, installed frozen dependencies in a fresh virtual environment, verified all tests and linters pass cleanly, and cleaned up without forced removal.
+- **Direct CLI Bootstrap Remediation (`scripts/bootstrap.py`, `tests/test_bootstrap.py`)**:
+  - Resolved `sys.path` issue causing `ModuleNotFoundError: No module named 'backend'` during direct CLI or `make bootstrap` invocations.
+  - Added regression test `test_cli_bootstrap_script_direct_execution` verifying direct invocation without `PYTHONPATH`.
+- **Documentation & Hygiene Updates (`docs/SETUP.md`, `.gitignore`)**:
+  - Removed obsolete Starlette deprecation warning notes in `docs/SETUP.md`.
+  - Explicitly added host bind-mount directory `mlflow-data/` to `.gitignore`.
+- **Full-Stack Orchestration & Observability Audit**:
+  - Validated health check dependency chain across `mlflow`, `api`, `prometheus`, and `grafana`.
+  - Confirmed active `champion` alias on version 5 of registered model `churn-classifier`.
+  - Verified real predictions on both classes (churn and non-churn) matching the strict API schema.
+  - Verified Prometheus target health (`up`), metric ingestion (`modelforge_prediction_requests_total`), Grafana health (`ok`), datasource provisioning, and dashboard panels.
+- **Service Persistence & Resilience**:
+  - Stopped and restarted the Docker Compose stack without `-v`, confirming complete recovery of healthy status and preservation of model artifacts, SQLite database, and dashboard state.
+- **Final Audit Report (`docs/FINAL_ENGINEERING_AUDIT.md`)**:
+  - Compiled exhaustive audit evidence, verification matrix, findings breakdown, and final PASS verdict.

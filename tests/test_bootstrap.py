@@ -1,3 +1,6 @@
+import os
+import subprocess
+import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -319,3 +322,20 @@ def test_cli_bootstrap_unexpected_exception(capsys):
     assert exit_code == 1
     err = capsys.readouterr().err
     assert "Bootstrap error: MLflow connection timed out" in err
+
+
+def test_cli_bootstrap_script_direct_execution():
+    """Verify scripts/bootstrap.py can be invoked directly without PYTHONPATH."""
+    env = os.environ.copy()
+    env.pop("PYTHONPATH", None)
+
+    result = subprocess.run(
+        [sys.executable, "scripts/bootstrap.py", "--help"],
+        capture_output=True,
+        text=True,
+        env=env,
+        check=False,
+    )
+
+    assert result.returncode == 0
+    assert "Bootstrap ModelForge MLflow tracking" in result.stdout

@@ -313,12 +313,7 @@ make test
 # equivalent: uv run pytest tests/ -q
 ```
 
-Expected: 110 tests pass in approximately 11 seconds.
-
-> **Known warning during tests**: `StarletteDeprecationWarning: Using httpx with
-> starlette.testclient is deprecated; install httpx2 instead.`  
-> This originates in the FastAPI test client, not in ModelForge code.
-> Application behaviour is unaffected. Tracked as Milestone 5.
+Expected: All tests pass cleanly with 0 warnings in approximately 5 seconds.
 
 ### Linting
 
