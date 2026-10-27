@@ -102,3 +102,85 @@ def test_save_model(tmp_path: Path):
     save_model(model, model_path)
 
     assert model_path.exists()
+
+
+def test_train_churn_model_passes_random_state():
+    df = pd.DataFrame(
+        {
+            "age": [22, 45, 31, 52, 28, 39],
+            "tenure": [3, 36, 8, 48, 6, 24],
+            "monthly_charges": [79.5, 65.2, 91.7, 58.3, 85.4, 72.1],
+            "contract_type": [
+                "monthly",
+                "annual",
+                "monthly",
+                "annual",
+                "monthly",
+                "annual",
+            ],
+            "support_tickets": [5, 1, 4, 0, 6, 2],
+            "churn": [1, 0, 1, 0, 1, 0],
+        }
+    )
+
+    config = TrainingConfig(random_state=123)
+    model = train_churn_model(df, config)
+
+    assert model.named_steps["model"].random_state == 123
+
+
+def test_deterministic_training_behavior():
+    df = pd.DataFrame(
+        {
+            "age": [22, 45, 31, 52, 28, 39, 24, 61, 35, 48],
+            "tenure": [3, 36, 8, 48, 6, 24, 4, 60, 12, 42],
+            "monthly_charges": [
+                79.5,
+                65.2,
+                91.7,
+                58.3,
+                85.4,
+                72.1,
+                95.8,
+                54.9,
+                88.6,
+                63.7,
+            ],
+            "contract_type": [
+                "monthly",
+                "annual",
+                "monthly",
+                "annual",
+                "monthly",
+                "annual",
+                "monthly",
+                "annual",
+                "monthly",
+                "annual",
+            ],
+            "support_tickets": [5, 1, 4, 0, 6, 2, 7, 1, 3, 1],
+            "churn": [1, 0, 1, 0, 1, 0, 1, 0, 1, 0],
+        }
+    )
+
+    config1 = TrainingConfig(random_state=42)
+    config2 = TrainingConfig(random_state=42)
+
+    model1 = train_churn_model(df, config1)
+    model2 = train_churn_model(df, config2)
+
+    eval_df = df.drop(columns=["churn"])
+    preds1 = model1.predict(eval_df)
+    preds2 = model2.predict(eval_df)
+
+    import numpy as np
+
+    np.testing.assert_array_equal(preds1, preds2)
+    np.testing.assert_allclose(
+        model1.named_steps["model"].coef_,
+        model2.named_steps["model"].coef_,
+    )
+    np.testing.assert_allclose(
+        model1.named_steps["model"].intercept_,
+        model2.named_steps["model"].intercept_,
+    )
