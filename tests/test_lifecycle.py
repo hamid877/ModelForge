@@ -400,3 +400,87 @@ def test_training_failure_persists_failure_record(sample_data, tmp_path):
     assert record["failure"]["type"] == "RuntimeError"
     assert "message" not in record["failure"]
     assert "training failed" not in row[1]
+
+
+def test_drift_triggered_retraining_preserves_champion_when_gate_fails(
+    sample_data, tmp_path
+):
+    """Drift-triggered retraining does not promote when benchmark quality gate fails."""
+    drift_result = {
+        "status": "retraining_recommended",
+        "retraining_recommended": True,
+        "reason": "feature_drift_detected",
+        "drift_report": {"drift_detected": True},
+    }
+    metrics = {"accuracy": 0.82, "f1_score": 0.78}
+    decision = PromotionDecision(
+        approved=False,
+        reason="candidate_f1_below_champion",
+        candidate_f1=0.78,
+        champion_f1=0.85,
+    )
+
+    with (
+        patch(
+            "backend.app.ml.lifecycle.assess_retraining_need",
+            return_value=drift_result,
+        ),
+        patch(
+            "backend.app.ml.lifecycle.run_training_and_promote",
+            return_value=(metrics, decision),
+        ) as mock_train,
+    ):
+        result = run_drift_aware_lifecycle(
+            sample_data,
+            sample_data.copy(),
+            tmp_path / "candidate.joblib",
+        )
+
+    assert result["status"] == "promotion_rejected"
+    assert result["promotion"]["approved"] is False
+    assert result["promotion"]["reason"] == "candidate_f1_below_champion"
+    mock_train.assert_called_once()
+
+
+def test_drift_triggered_retraining_passes_benchmark_to_workflow(sample_data, tmp_path):
+    """Lifecycle passes explicit benchmark dataset to run_training_and_promote."""
+    drift_result = {
+        "status": "retraining_recommended",
+        "retraining_recommended": True,
+        "reason": "feature_drift_detected",
+        "drift_report": {"drift_detected": True},
+    }
+    decision = PromotionDecision(
+        approved=True,
+        reason="candidate_meets_quality_gate",
+        candidate_f1=0.90,
+        champion_f1=0.80,
+    )
+
+    benchmark_df = sample_data.copy()
+
+    with (
+        patch(
+            "backend.app.ml.lifecycle.assess_retraining_need",
+            return_value=drift_result,
+        ),
+        patch(
+            "backend.app.ml.lifecycle.run_training_and_promote",
+            return_value=({"f1_score": 0.90}, decision),
+        ) as mock_train,
+    ):
+        result = run_drift_aware_lifecycle(
+            sample_data,
+            sample_data.copy(),
+            tmp_path / "candidate.joblib",
+            benchmark_df=benchmark_df,
+            benchmark_version="v2",
+        )
+
+    assert result["status"] == "promoted"
+    mock_train.assert_called_once()
+    args, kwargs = mock_train.call_args
+    pd.testing.assert_frame_equal(args[0], sample_data)
+    assert args[1] == tmp_path / "candidate.joblib"
+    pd.testing.assert_frame_equal(kwargs["benchmark_df"], benchmark_df)
+    assert kwargs["benchmark_version"] == "v2"
