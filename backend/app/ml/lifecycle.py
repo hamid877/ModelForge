@@ -16,8 +16,15 @@ def run_drift_aware_lifecycle(
     reference: pd.DataFrame,
     current: pd.DataFrame,
     model_path: str | Path,
+    *,
+    benchmark_df: pd.DataFrame | None = None,
+    benchmark_version: str | None = None,
 ) -> dict[str, Any]:
-    """Assess drift, optionally retrain, and persist lifecycle outcomes."""
+    """Assess drift, optionally retrain, and persist lifecycle outcomes.
+
+    Note: Retrained candidates must pass the shared benchmark gate; drift
+    batches are not used as promotion benchmarks.
+    """
     assessment = assess_retraining_need(reference, current)
 
     result: dict[str, Any] = {
@@ -39,7 +46,12 @@ def run_drift_aware_lifecycle(
         return result
 
     try:
-        metrics, decision = run_training_and_promote(current, model_path)
+        metrics, decision = run_training_and_promote(
+            current,
+            model_path,
+            benchmark_df=benchmark_df,
+            benchmark_version=benchmark_version,
+        )
     except Exception as exc:
         logger.exception(
             "lifecycle_training_failed reason=%s",

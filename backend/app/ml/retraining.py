@@ -1,9 +1,12 @@
+from pathlib import Path
 from typing import Any
 
 import pandas as pd
 
 from backend.app.config import settings
 from backend.app.ml.drift import detect_data_drift
+from backend.app.ml.training import TrainingConfig
+from backend.app.ml.workflow import run_training
 
 
 def assess_retraining_need(
@@ -40,3 +43,22 @@ def assess_retraining_need(
         "reason": "no_feature_drift_detected",
         "drift_report": drift_report,
     }
+
+
+def retrain_model_without_promotion(
+    df: pd.DataFrame,
+    model_path: str | Path,
+    config: TrainingConfig | None = None,
+    register_model: bool = True,
+) -> dict[str, float]:
+    """Retrain and optionally register candidate model without promoting to champion.
+
+    Decouples model retraining from promotion to prevent drift batches from
+    automatically promoting models without benchmark validation.
+    """
+    return run_training(
+        df,
+        model_path,
+        config=config,
+        register_model=register_model,
+    )

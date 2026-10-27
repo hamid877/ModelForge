@@ -94,3 +94,24 @@ def test_drift_recommendation_includes_reason(reference_data):
 
     assert result["retraining_recommended"] is True
     assert result["reason"] == "feature_drift_detected"
+
+
+def test_retrain_model_without_promotion_calls_run_training(reference_data, tmp_path):
+    """Retraining candidate is decoupled from promotion; promote_model is not called."""
+    from unittest.mock import patch
+
+    from backend.app.ml.retraining import retrain_model_without_promotion
+
+    current = reference_data.copy()
+    current["churn"] = [0, 1] * 10
+    model_path = tmp_path / "candidate.joblib"
+
+    with patch("backend.app.ml.retraining.run_training") as mock_train:
+        mock_train.return_value = {"accuracy": 0.85, "f1_score": 0.80}
+
+        metrics = retrain_model_without_promotion(current, model_path)
+
+    assert metrics["f1_score"] == 0.80
+    mock_train.assert_called_once_with(
+        current, model_path, config=None, register_model=True
+    )

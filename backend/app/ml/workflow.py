@@ -6,7 +6,11 @@ import pandas as pd
 
 from backend.app.config import settings
 from backend.app.ml.evaluation import evaluate_churn_model
-from backend.app.ml.promotion import PromotionDecision, promote_model
+from backend.app.ml.promotion import (
+    PromotionDecision,
+    load_benchmark_dataset,
+    promote_model,
+)
 from backend.app.ml.tracking import setup_mlflow
 from backend.app.ml.training import (
     TrainingConfig,
@@ -66,8 +70,11 @@ def run_training_and_promote(
     df: pd.DataFrame,
     model_path: str | Path,
     config: TrainingConfig | None = None,
+    *,
+    benchmark_df: pd.DataFrame | None = None,
+    benchmark_version: str | None = None,
 ) -> tuple[dict[str, float], PromotionDecision]:
-    """Train, register, and promote a model only when it passes quality gates."""
+    """Train, register, and evaluate candidate promotion on shared benchmark."""
     config = config or TrainingConfig()
 
     setup_mlflow()
@@ -110,9 +117,30 @@ def run_training_and_promote(
                 "promotion was not attempted."
             )
 
+        # Resolve shared benchmark dataset if not explicitly supplied
+        resolved_benchmark_df = benchmark_df
+        resolved_benchmark_version = benchmark_version or settings.benchmark_version
+        if (
+            resolved_benchmark_df is None
+            and Path(settings.benchmark_data_path).exists()
+        ):
+            try:
+                benchmark = load_benchmark_dataset(
+                    settings.benchmark_data_path,
+                    version=resolved_benchmark_version,
+                )
+                resolved_benchmark_df = benchmark.data
+                resolved_benchmark_version = benchmark.version
+            except Exception:
+                resolved_benchmark_df = None
+
         decision = promote_model(
             candidate_version=candidate_version,
             candidate_f1=metrics["f1_score"],
+            candidate_training_df=df,
+            candidate_model=model,
+            benchmark_df=resolved_benchmark_df,
+            benchmark_version=resolved_benchmark_version,
             model_name=settings.model_name,
             alias=settings.model_alias,
         )
