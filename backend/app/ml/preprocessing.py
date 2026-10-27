@@ -1,6 +1,6 @@
 import pandas as pd
 from sklearn.compose import ColumnTransformer
-from sklearn.preprocessing import OneHotEncoder
+from sklearn.preprocessing import OneHotEncoder, StandardScaler
 
 FEATURE_COLUMNS = [
     "age",
@@ -39,10 +39,14 @@ def create_preprocessor() -> ColumnTransformer:
     return ColumnTransformer(
         transformers=[
             (
+                "numerical",
+                StandardScaler(),
+                NUMERICAL_COLUMNS,
+            ),
+            (
                 "categorical",
                 OneHotEncoder(handle_unknown="ignore"),
                 CATEGORICAL_COLUMNS,
             ),
         ],
-        remainder="passthrough",
     )
