@@ -30,7 +30,14 @@ def train_churn_model(
     pipeline = Pipeline(
         steps=[
             ("preprocessor", create_preprocessor()),
-            ("model", LogisticRegression(C=config.c, max_iter=config.max_iter)),
+            (
+                "model",
+                LogisticRegression(
+                    C=config.c,
+                    max_iter=config.max_iter,
+                    random_state=config.random_state,
+                ),
+            ),
         ]
     )
 
