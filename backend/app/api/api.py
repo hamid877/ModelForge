@@ -3,15 +3,21 @@ import time
 from collections import deque
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Annotated
 
 import pandas as pd
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 from prometheus_client import CONTENT_TYPE_LATEST
 from starlette.responses import Response
 
-from backend.app.api.schemas import ChurnPredictionRequest, DriftBatchRequest
+from backend.app.api.schemas import (
+    ChurnPredictionRequest,
+    DriftBatchRequest,
+    PromotionAuditRecord,
+)
 from backend.app.config import settings
+from backend.app.ml.audit import AuditDatabaseError, get_promotion_audit_records
 from backend.app.ml.drift import detect_data_drift
 from backend.app.ml.registry import load_registered_model_by_alias
 from backend.app.ml.tracking import setup_mlflow
@@ -331,3 +337,26 @@ def monitor_data_drift(
             status_code=422,
             detail="Drift detection could not process the supplied datasets.",
         ) from None
+
+
+@app.get(
+    "/audit/promotions",
+    response_model=list[PromotionAuditRecord],
+)
+def get_promotion_audits(
+    limit: Annotated[int, Query(ge=1, le=100)] = 10,
+) -> list[PromotionAuditRecord]:
+    """Retrieve recent model promotion audit records newest first."""
+    try:
+        records = get_promotion_audit_records(
+            database_path=settings.promotion_audit_db_path,
+            limit=limit,
+        )
+    except AuditDatabaseError:
+        logger.exception("promotion_audit_retrieval_failed")
+        raise HTTPException(
+            status_code=503,
+            detail="The promotion audit service is unavailable.",
+        ) from None
+
+    return [PromotionAuditRecord.model_validate(record) for record in records]

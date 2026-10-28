@@ -1,6 +1,7 @@
 """SQLite persistence for model lifecycle audit records."""
 
 import json
+import logging
 import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
@@ -8,6 +9,12 @@ from typing import Any
 from uuid import uuid4
 
 from backend.app.config import settings
+
+logger = logging.getLogger(__name__)
+
+
+class AuditDatabaseError(RuntimeError):
+    """Raised when the audit database cannot be read due to corruption or failure."""
 
 
 def record_lifecycle_run(
@@ -203,9 +210,9 @@ def get_promotion_audit_records(
     if not db_path.exists():
         return []
 
-    with sqlite3.connect(db_path) as connection:
-        connection.row_factory = sqlite3.Row
-        try:
+    try:
+        with sqlite3.connect(db_path) as connection:
+            connection.row_factory = sqlite3.Row
             cursor = connection.execute(
                 """
                 SELECT audit_id, timestamp, model_name, candidate_version,
@@ -219,13 +226,24 @@ def get_promotion_audit_records(
                 (limit,),
             )
             rows = cursor.fetchall()
-        except sqlite3.OperationalError:
+    except sqlite3.OperationalError as exc:
+        if "no such table" in str(exc).lower():
             return []
+        logger.exception("promotion_audit_read_failed")
+        raise AuditDatabaseError("Failed to read promotion audit database.") from exc
+    except (sqlite3.DatabaseError, OSError) as exc:
+        logger.exception("promotion_audit_read_failed")
+        raise AuditDatabaseError("Failed to read promotion audit database.") from exc
 
     results = []
-    for row in rows:
-        item = dict(row)
-        item["approved"] = bool(item["approved"])
-        item["payload"] = json.loads(item["payload"])
-        results.append(item)
+    try:
+        for row in rows:
+            item = dict(row)
+            item["approved"] = bool(item["approved"])
+            item["payload"] = json.loads(item["payload"])
+            results.append(item)
+    except (json.JSONDecodeError, TypeError, KeyError) as exc:
+        logger.exception("promotion_audit_payload_corrupted")
+        raise AuditDatabaseError("Failed to parse promotion audit payload.") from exc
+
     return results
