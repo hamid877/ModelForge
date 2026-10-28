@@ -17,6 +17,7 @@
 6. [Deployment Procedure](#6-deployment-procedure)
 7. [Security Considerations](#7-security-considerations)
 8. [Known Limitations](#8-known-limitations)
+9. [Promotion Audit API](#9-promotion-audit-api)
 
 ---
 
@@ -168,6 +169,7 @@ All settings use the `MODELFORGE_` prefix and are loaded by `pydantic-settings`:
 | `drift_min_samples` | `MODELFORGE_DRIFT_MIN_SAMPLES` | `10` | Minimum batch size for drift detection |
 | `drift_p_value_threshold` | `MODELFORGE_DRIFT_P_VALUE_THRESHOLD` | `0.05` | p-value threshold for KS / chi-squared tests |
 | `lifecycle_audit_db_path` | `MODELFORGE_LIFECYCLE_AUDIT_DB_PATH` | `data/lifecycle_audit.db` | SQLite path for lifecycle audit events |
+| `promotion_audit_db_path` | `MODELFORGE_PROMOTION_AUDIT_DB_PATH` | `data/lifecycle_audit.db` | SQLite path for promotion audit records |
 
 > **Changing `promotion_minimum_f1`**: This threshold is enforced by the
 > bootstrap and promotion code. Lowering it reduces quality assurance; raising
@@ -326,6 +328,7 @@ make up
 ```bash
 curl http://127.0.0.1:8000/health   # {"status":"healthy"}
 curl http://127.0.0.1:8000/ready    # {"status":"ready"}
+curl "http://127.0.0.1:8000/audit/promotions?limit=5"  # [] or recent audit records
 ```
 
 ### Updating the deployment
@@ -351,9 +354,9 @@ HTTP Basic/OAuth) in front of every service.
 
 ### No authentication on the API
 
-The FastAPI application (`/predict`, `/monitoring/drift`, `/metrics`) has no
-authentication layer. Any process that can reach port 8000 can submit predictions
-and trigger drift analysis.
+The FastAPI application (`/predict`, `/monitoring/drift`, `/metrics`, `/audit/promotions`) has no
+authentication layer. Any process that can reach port 8000 can submit predictions,
+trigger drift analysis, or inspect promotion audit logs.
 
 ### No authentication on Prometheus
 
@@ -401,3 +404,128 @@ permission errors will occur.
 | **No secrets management** | Credentials are in `.env` on disk | Integrate Docker Secrets or a vault |
 | **Prometheus metrics are in-process** | Metrics reset on each API restart | Accept limitation for current scale |
 | **No retraining trigger** | Model is not automatically retrained when drift is detected | Drift endpoint reports drift; retraining must be triggered manually |
+
+---
+
+## 9. Promotion Audit API
+
+ModelForge exposes persisted model-promotion audit records via a read-only endpoint:
+
+`GET /audit/promotions`
+
+### Query parameters
+
+| Parameter | Type | Default | Constraints | Description |
+|---|---|---|---|---|
+| `limit` | integer | `10` | `1 <= limit <= 100` | Maximum number of promotion records to return (newest first). |
+
+- Supplying invalid values (e.g. `limit=0`, negative values, values greater than `100`, or non-integer strings) returns **HTTP 422 Unprocessable Entity**.
+
+### Empty-state behavior
+
+The endpoint returns **HTTP 200 OK** with an empty JSON array (`[]`) under any of the following conditions:
+- The configured SQLite audit database (`settings.promotion_audit_db_path`) does not exist on disk.
+- The SQLite database file exists but the `promotion_audit` table has not yet been created.
+- The `promotion_audit` table exists but contains no records.
+
+### Storage error handling
+
+If the audit database file is corrupted, unreadable, or encounters storage failures:
+- The failure is logged server-side without exposing internal paths or database specifics to the client.
+- The endpoint returns **HTTP 503 Service Unavailable** with detail:
+  ```json
+  {"detail": "The promotion audit service is unavailable."}
+  ```
+
+### Read-only and isolation guarantees
+
+- **Zero MLflow interaction**: The endpoint queries the local SQLite audit database directly and never connects to MLflow tracking or the registered model registry.
+- **Zero alias mutations**: The endpoint cannot modify model registry aliases (e.g. `champion`) or alter model state.
+- **Read-only query**: Queries run exclusively as `SELECT ... FROM promotion_audit ORDER BY timestamp DESC LIMIT ?`.
+
+### Response shape (`PromotionAuditRecord`)
+
+Responses are returned as a JSON array of `PromotionAuditRecord` objects ordered by `timestamp` descending (newest first):
+
+| Field | Type | Nullable | Description |
+|---|---|---|---|
+| `audit_id` | string | No | Unique UUIDv4 identifier of the promotion evaluation event. |
+| `timestamp` | string | No | ISO-8601 UTC timestamp of the evaluation. |
+| `model_name` | string | No | Registered model name (e.g. `"churn-classifier"`). |
+| `candidate_version` | string | Yes | Registered version number of the candidate model. |
+| `candidate_run_id` | string | Yes | MLflow run ID associated with the candidate model. |
+| `champion_version` | string | Yes | Version number of the active champion model (`null` if no champion existed). |
+| `approved` | boolean | No | `true` if candidate was promoted; `false` if rejected or aborted. |
+| `reason` | string | No | Machine-readable gate outcome or rejection reason. |
+| `candidate_f1` | float | No | Candidate F1 score evaluated on the shared benchmark. |
+| `champion_f1` | float | Yes | Champion F1 score on the benchmark (`null` if no prior champion). |
+| `benchmark_version` | string | No | Benchmark dataset version string (e.g. `"v1"`). |
+| `benchmark_digest` | string | No | SHA-256 hex digest of the benchmark dataset. |
+| `margin` | float | No | Configured minimum F1 improvement margin (e.g. `0.01`). |
+| `payload` | object | No | Parsed JSON object containing detailed evaluation metrics, sequential gate outcomes, and dataset provenance. |
+
+### Example request and response
+
+```bash
+curl "http://127.0.0.1:8000/audit/promotions?limit=1"
+```
+
+```json
+[
+  {
+    "audit_id": "8bbbb9df-996c-4b53-9d8a-8a436214fc91",
+    "timestamp": "2026-10-28T18:20:00+00:00",
+    "model_name": "churn-classifier",
+    "candidate_version": "2",
+    "candidate_run_id": "4b68db6e30b64d3fa54226d9c79e6a9f",
+    "champion_version": "1",
+    "approved": true,
+    "reason": "candidate_meets_quality_gate",
+    "candidate_f1": 0.8524,
+    "champion_f1": 0.8012,
+    "benchmark_version": "v1",
+    "benchmark_digest": "68f772d75783db0ded9aca953f8fbab70718a531048a88bffcfb5d2d5bc715fe",
+    "margin": 0.01,
+    "payload": {
+      "audit_id": "8bbbb9df-996c-4b53-9d8a-8a436214fc91",
+      "timestamp": "2026-10-28T18:20:00+00:00",
+      "model_name": "churn-classifier",
+      "candidate_version": "2",
+      "candidate_run_id": "4b68db6e30b64d3fa54226d9c79e6a9f",
+      "champion_version": "1",
+      "approved": true,
+      "reason": "candidate_meets_quality_gate",
+      "candidate_f1": 0.8524,
+      "champion_f1": 0.8012,
+      "benchmark_version": "v1",
+      "benchmark_digest": "68f772d75783db0ded9aca953f8fbab70718a531048a88bffcfb5d2d5bc715fe",
+      "margin": 0.01,
+      "gate_outcomes": {
+        "benchmark_provenance_gate": {
+          "passed": true,
+          "digest": "68f772d75783db0ded9aca953f8fbab70718a531048a88bffcfb5d2d5bc715fe"
+        },
+        "quality_gate": {
+          "passed": true,
+          "candidate_f1": 0.8524,
+          "champion_f1": 0.8012,
+          "margin": 0.01,
+          "reason": "candidate_meets_quality_gate"
+        }
+      },
+      "candidate_metrics": {
+        "f1_score": 0.8524,
+        "accuracy": 0.8910
+      },
+      "champion_metrics": {
+        "f1_score": 0.8012,
+        "accuracy": 0.8650
+      },
+      "dataset_provenance": {
+        "training_records": 1000,
+        "training_features": ["age", "tenure", "monthly_charges", "contract_type", "support_tickets"]
+      }
+    }
+  }
+]
+```

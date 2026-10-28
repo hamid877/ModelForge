@@ -1,7 +1,9 @@
 import json
 import sqlite3
 
-from backend.app.ml.audit import record_lifecycle_run
+import pytest
+
+from backend.app.ml.audit import AuditDatabaseError, record_lifecycle_run
 
 
 def test_record_lifecycle_run_persists_payload(tmp_path):
@@ -61,3 +63,26 @@ def test_each_lifecycle_record_has_unique_id(tmp_path):
         count = connection.execute("SELECT COUNT(*) FROM lifecycle_audit").fetchone()[0]
 
     assert count == 2
+
+
+def test_get_promotion_audit_records_missing_table(tmp_path):
+    database_path = tmp_path / "empty.db"
+    with sqlite3.connect(database_path) as conn:
+        conn.execute("CREATE TABLE other_table (id INT)")
+
+    from backend.app.ml.audit import get_promotion_audit_records
+
+    records = get_promotion_audit_records(database_path=database_path)
+    assert records == []
+
+
+def test_get_promotion_audit_records_corrupted_file(tmp_path):
+    corrupt_db = tmp_path / "corrupt.db"
+    corrupt_db.write_text("not a valid sqlite file")
+
+    from backend.app.ml.audit import get_promotion_audit_records
+
+    with pytest.raises(
+        AuditDatabaseError, match="Failed to read promotion audit database"
+    ):
+        get_promotion_audit_records(database_path=corrupt_db)

@@ -1,4 +1,5 @@
 import logging
+import sqlite3
 from unittest.mock import patch
 
 import pandas as pd
@@ -6,6 +7,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from backend.app.api import api as api_module
+from backend.app.ml.audit import record_promotion_audit
 
 app = api_module.app
 
@@ -706,3 +708,346 @@ def test_drift_endpoint_returns_503_when_reference_is_invalid(
     assert response.status_code == 503
     assert response.json() == {"detail": "Drift monitoring reference data is invalid."}
     assert getattr(app.state, "drift_reference_path", None) != str(invalid_path)
+
+
+@patch("backend.app.api.api.load_registered_model_by_alias")
+def test_audit_promotions_missing_database_returns_empty_list(
+    mock_load_model, tmp_path
+):
+    """Return 200 and empty list when the audit database file does not exist."""
+    mock_load_model.return_value.predict.return_value = [0]
+    missing_db = tmp_path / "nonexistent.db"
+
+    with (
+        patch(
+            "backend.app.api.api.settings.promotion_audit_db_path",
+            str(missing_db),
+        ),
+        TestClient(app) as client,
+    ):
+        response = client.get("/audit/promotions")
+
+    assert response.status_code == 200
+    assert response.json() == []
+
+
+@patch("backend.app.api.api.load_registered_model_by_alias")
+def test_audit_promotions_missing_table_returns_empty_list(mock_load_model, tmp_path):
+    """Return 200 and empty list when promotion_audit table is missing."""
+    mock_load_model.return_value.predict.return_value = [0]
+    empty_db = tmp_path / "empty.db"
+    with sqlite3.connect(empty_db) as conn:
+        conn.execute("CREATE TABLE other_table (id INTEGER PRIMARY KEY)")
+
+    with (
+        patch(
+            "backend.app.api.api.settings.promotion_audit_db_path",
+            str(empty_db),
+        ),
+        TestClient(app) as client,
+    ):
+        response = client.get("/audit/promotions")
+
+    assert response.status_code == 200
+    assert response.json() == []
+
+
+@patch("backend.app.api.api.load_registered_model_by_alias")
+def test_audit_promotions_populated_database_returns_correct_fields_and_payload(
+    mock_load_model, tmp_path
+):
+    """Return correct schema, types, booleans, nullable fields, and parsed payload."""
+    mock_load_model.return_value.predict.return_value = [0]
+    db_path = tmp_path / "audit.db"
+
+    record_1 = {
+        "audit_id": "audit-full-1",
+        "timestamp": "2026-10-28T10:00:00Z",
+        "model_name": "churn-classifier",
+        "candidate_version": "2",
+        "candidate_run_id": "run-abc",
+        "champion_version": "1",
+        "approved": True,
+        "reason": "candidate_meets_quality_gate",
+        "candidate_f1": 0.85,
+        "champion_f1": 0.80,
+        "benchmark_version": "v1",
+        "benchmark_digest": "sha256abc123",
+        "margin": 0.01,
+        "gate_outcomes": {"quality_gate": {"passed": True}},
+        "candidate_metrics": {"f1_score": 0.85, "accuracy": 0.90},
+        "champion_metrics": {"f1_score": 0.80, "accuracy": 0.87},
+        "dataset_provenance": {"training_records": 1000},
+    }
+    record_2 = {
+        "audit_id": "audit-nulls-2",
+        "timestamp": "2026-10-28T11:00:00Z",
+        "model_name": "churn-classifier",
+        "candidate_version": None,
+        "candidate_run_id": None,
+        "champion_version": None,
+        "approved": False,
+        "reason": "candidate_f1_below_champion",
+        "candidate_f1": 0.70,
+        "champion_f1": None,
+        "benchmark_version": "v1",
+        "benchmark_digest": "sha256abc123",
+        "margin": 0.01,
+        "gate_outcomes": {"quality_gate": {"passed": False}},
+    }
+    record_promotion_audit(record_1, database_path=db_path)
+    record_promotion_audit(record_2, database_path=db_path)
+
+    with (
+        patch(
+            "backend.app.api.api.settings.promotion_audit_db_path",
+            str(db_path),
+        ),
+        TestClient(app) as client,
+    ):
+        response = client.get("/audit/promotions")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert len(data) == 2
+
+    # Newest first: record_2 is newer
+    r2 = data[0]
+    assert r2["audit_id"] == "audit-nulls-2"
+    assert r2["timestamp"] == "2026-10-28T11:00:00Z"
+    assert r2["candidate_version"] is None
+    assert r2["candidate_run_id"] is None
+    assert r2["champion_version"] is None
+    assert r2["champion_f1"] is None
+    assert r2["approved"] is False
+    assert r2["reason"] == "candidate_f1_below_champion"
+    assert r2["candidate_f1"] == 0.70
+    assert r2["payload"]["gate_outcomes"]["quality_gate"]["passed"] is False
+
+    # Oldest record: record_1
+    r1 = data[1]
+    assert r1["audit_id"] == "audit-full-1"
+    assert r1["timestamp"] == "2026-10-28T10:00:00Z"
+    assert r1["candidate_version"] == "2"
+    assert r1["candidate_run_id"] == "run-abc"
+    assert r1["champion_version"] == "1"
+    assert r1["champion_f1"] == 0.80
+    assert r1["approved"] is True
+    assert r1["reason"] == "candidate_meets_quality_gate"
+    assert r1["candidate_f1"] == 0.85
+    assert r1["payload"]["candidate_metrics"] == {"f1_score": 0.85, "accuracy": 0.90}
+    assert r1["payload"]["champion_metrics"] == {"f1_score": 0.80, "accuracy": 0.87}
+    assert r1["payload"]["dataset_provenance"] == {"training_records": 1000}
+
+
+@patch("backend.app.api.api.load_registered_model_by_alias")
+def test_audit_promotions_ordered_newest_first(mock_load_model, tmp_path):
+    """Return promotion audit records ordered newest first (descending timestamp)."""
+    mock_load_model.return_value.predict.return_value = [0]
+    db_path = tmp_path / "audit.db"
+
+    timestamps = [
+        "2026-10-28T09:00:00Z",
+        "2026-10-28T12:00:00Z",
+        "2026-10-28T10:30:00Z",
+    ]
+    for i, ts in enumerate(timestamps):
+        record_promotion_audit(
+            {
+                "audit_id": f"audit-{i}",
+                "timestamp": ts,
+                "model_name": "churn-classifier",
+                "approved": True,
+                "reason": "candidate_meets_quality_gate",
+                "candidate_f1": 0.85,
+            },
+            database_path=db_path,
+        )
+
+    with (
+        patch(
+            "backend.app.api.api.settings.promotion_audit_db_path",
+            str(db_path),
+        ),
+        TestClient(app) as client,
+    ):
+        response = client.get("/audit/promotions")
+
+    assert response.status_code == 200
+    returned_timestamps = [r["timestamp"] for r in response.json()]
+    assert returned_timestamps == [
+        "2026-10-28T12:00:00Z",
+        "2026-10-28T10:30:00Z",
+        "2026-10-28T09:00:00Z",
+    ]
+
+
+@patch("backend.app.api.api.load_registered_model_by_alias")
+def test_audit_promotions_limit_restricts_count(mock_load_model, tmp_path):
+    """Limit parameter restricts the count of returned records."""
+    mock_load_model.return_value.predict.return_value = [0]
+    db_path = tmp_path / "audit.db"
+
+    for i in range(15):
+        record_promotion_audit(
+            {
+                "audit_id": f"audit-{i:02d}",
+                "timestamp": f"2026-10-28T10:{i:02d}:00Z",
+                "model_name": "churn-classifier",
+                "approved": True,
+                "reason": "candidate_meets_quality_gate",
+                "candidate_f1": 0.85,
+            },
+            database_path=db_path,
+        )
+
+    with (
+        patch(
+            "backend.app.api.api.settings.promotion_audit_db_path",
+            str(db_path),
+        ),
+        TestClient(app) as client,
+    ):
+        # Default limit is 10
+        resp_default = client.get("/audit/promotions")
+        assert resp_default.status_code == 200
+        assert len(resp_default.json()) == 10
+
+        # Custom limit = 3
+        resp_3 = client.get("/audit/promotions?limit=3")
+        assert resp_3.status_code == 200
+        records_3 = resp_3.json()
+        assert len(records_3) == 3
+        # Ensure it returns the 3 newest
+        assert [r["audit_id"] for r in records_3] == [
+            "audit-14",
+            "audit-13",
+            "audit-12",
+        ]
+
+
+@pytest.mark.parametrize("invalid_limit", [0, -1, -10, 101, 200, "abc"])
+@patch("backend.app.api.api.load_registered_model_by_alias")
+def test_audit_promotions_invalid_limit_returns_422(mock_load_model, invalid_limit):
+    """Reject limit values outside 1 <= limit <= 100 with HTTP 422."""
+    mock_load_model.return_value.predict.return_value = [0]
+
+    with TestClient(app) as client:
+        response = client.get(f"/audit/promotions?limit={invalid_limit}")
+
+    assert response.status_code == 422
+
+
+@patch("backend.app.api.api.load_registered_model_by_alias")
+def test_audit_promotions_uses_configured_db_path(mock_load_model, tmp_path):
+    """Endpoint respects the configured settings.promotion_audit_db_path."""
+    mock_load_model.return_value.predict.return_value = [0]
+    db_1 = tmp_path / "audit_1.db"
+    db_2 = tmp_path / "audit_2.db"
+
+    record_promotion_audit(
+        {
+            "audit_id": "audit-from-db-1",
+            "timestamp": "2026-10-28T10:00:00Z",
+            "model_name": "churn-classifier",
+            "approved": True,
+            "reason": "gate_passed",
+            "candidate_f1": 0.85,
+        },
+        database_path=db_1,
+    )
+    record_promotion_audit(
+        {
+            "audit_id": "audit-from-db-2",
+            "timestamp": "2026-10-28T10:00:00Z",
+            "model_name": "churn-classifier",
+            "approved": True,
+            "reason": "gate_passed",
+            "candidate_f1": 0.85,
+        },
+        database_path=db_2,
+    )
+
+    with (
+        patch(
+            "backend.app.api.api.settings.promotion_audit_db_path",
+            str(db_2),
+        ),
+        TestClient(app) as client,
+    ):
+        response = client.get("/audit/promotions")
+
+    assert response.status_code == 200
+    records = response.json()
+    assert len(records) == 1
+    assert records[0]["audit_id"] == "audit-from-db-2"
+
+
+@patch("backend.app.api.api.load_registered_model_by_alias")
+def test_audit_promotions_does_not_call_mlflow_or_mutate_aliases(
+    mock_load_model, tmp_path
+):
+    """The read-only audit endpoint does not call MLflow or mutate model aliases."""
+    mock_load_model.return_value.predict.return_value = [0]
+    db_path = tmp_path / "audit.db"
+
+    record_promotion_audit(
+        {
+            "audit_id": "audit-readonly",
+            "timestamp": "2026-10-28T10:00:00Z",
+            "model_name": "churn-classifier",
+            "approved": True,
+            "reason": "candidate_meets_quality_gate",
+            "candidate_f1": 0.85,
+        },
+        database_path=db_path,
+    )
+
+    with (
+        patch(
+            "backend.app.api.api.settings.promotion_audit_db_path",
+            str(db_path),
+        ),
+        TestClient(app) as client,
+    ):
+        # Reset mock after startup lifespan
+        mock_load_model.reset_mock()
+
+        with (
+            patch("mlflow.client.MlflowClient") as mock_client,
+            patch("mlflow.set_tracking_uri") as mock_set_tracking_uri,
+        ):
+            response = client.get("/audit/promotions")
+
+            assert response.status_code == 200
+            assert len(response.json()) == 1
+
+            mock_client.assert_not_called()
+            mock_set_tracking_uri.assert_not_called()
+            mock_load_model.assert_not_called()
+
+
+@patch("backend.app.api.api.load_registered_model_by_alias")
+def test_audit_promotions_corrupted_database_returns_503(
+    mock_load_model, tmp_path, caplog
+):
+    """Return 503 with generic error detail when audit database is corrupted."""
+    mock_load_model.return_value.predict.return_value = [0]
+    corrupt_db = tmp_path / "corrupt.db"
+    corrupt_db.write_text("not a valid sqlite file")
+
+    with (
+        patch(
+            "backend.app.api.api.settings.promotion_audit_db_path",
+            str(corrupt_db),
+        ),
+        TestClient(app) as client,
+    ):
+        with caplog.at_level(logging.ERROR, logger="backend.app.api.api"):
+            response = client.get("/audit/promotions")
+
+    assert response.status_code == 503
+    assert response.json() == {"detail": "The promotion audit service is unavailable."}
+    assert str(corrupt_db) not in response.json()["detail"]
+    assert "sqlite" not in response.json()["detail"].lower()
+    assert "promotion_audit_retrieval_failed" in caplog.text
