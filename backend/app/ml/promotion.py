@@ -1,9 +1,13 @@
 import hashlib
 import io
+import logging
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
+import mlflow
 import pandas as pd
 from mlflow import MlflowClient
 from mlflow.exceptions import MlflowException
@@ -11,8 +15,16 @@ from mlflow.protos.databricks_pb2 import ErrorCode
 
 from backend.app.config import settings
 from backend.app.data.validator import REQUIRED_COLUMNS, validate_churn_data
+from backend.app.ml.audit import record_promotion_audit
 from backend.app.ml.evaluation import evaluate_churn_model
+from backend.app.ml.provenance import (
+    compute_dataframe_sha256,
+    extract_dataset_provenance,
+)
 from backend.app.ml.registry import load_registered_model_by_alias
+from backend.app.ml.tracking import log_promotion_traceability_to_mlflow
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -25,6 +37,15 @@ class PromotionDecision:
     champion_f1: float | None
     benchmark_version: str | None = None
     margin: float = 0.0
+    benchmark_digest: str | None = None
+    candidate_metrics: dict[str, float] | None = None
+    champion_metrics: dict[str, float] | None = None
+    gate_outcomes: dict[str, Any] | None = None
+    candidate_version: int | str | None = None
+    champion_version: str | None = None
+    candidate_run_id: str | None = None
+    timestamp: str | None = None
+    audit_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -47,12 +68,6 @@ def compute_file_sha256(path: str | Path) -> str:
         while chunk := f.read(65536):
             hasher.update(chunk)
     return hasher.hexdigest()
-
-
-def compute_dataframe_sha256(df: pd.DataFrame) -> str:
-    """Compute a deterministic SHA-256 hex digest of a DataFrame's contents."""
-    csv_bytes = df.to_csv(index=False).encode("utf-8")
-    return hashlib.sha256(csv_bytes).hexdigest()
 
 
 def check_training_benchmark_overlap(
@@ -263,6 +278,175 @@ def evaluate_promotion(
     )
 
 
+def _persist_audit_and_finalize(
+    decision: PromotionDecision,
+    *,
+    model_name: str,
+    alias: str,
+    candidate_version: int | str,
+    candidate_run_id: str | None,
+    champion_version: str | None,
+    audit_db_path: str | Path | None,
+    candidate_training_df: pd.DataFrame | None,
+    client: MlflowClient | None = None,
+) -> PromotionDecision:
+    """Safely record audit and set alias only if approved and audit succeeds."""
+    timestamp = datetime.now(UTC).isoformat()
+    audit_id = str(uuid4())
+
+    if candidate_run_id is None:
+        try:
+            active = mlflow.active_run()
+            if active is not None:
+                candidate_run_id = active.info.run_id
+        except Exception:
+            pass
+
+    provenance_dict = None
+    if candidate_training_df is not None:
+        try:
+            provenance_dict = extract_dataset_provenance(
+                candidate_training_df
+            ).to_dict()
+        except Exception:
+            pass
+
+    audit_payload: dict[str, Any] = {
+        "audit_id": audit_id,
+        "timestamp": timestamp,
+        "model_name": model_name,
+        "candidate_version": (
+            str(candidate_version) if candidate_version is not None else None
+        ),
+        "candidate_run_id": candidate_run_id,
+        "champion_version": champion_version,
+        "approved": decision.approved,
+        "reason": decision.reason,
+        "candidate_f1": decision.candidate_f1,
+        "champion_f1": decision.champion_f1,
+        "benchmark_version": decision.benchmark_version or "",
+        "benchmark_digest": decision.benchmark_digest or "",
+        "margin": decision.margin,
+        "gate_outcomes": decision.gate_outcomes or {},
+        "candidate_metrics": decision.candidate_metrics,
+        "champion_metrics": decision.champion_metrics,
+        "dataset_provenance": provenance_dict,
+    }
+
+    if decision.approved:
+        # 1. Audit SQLite recording must succeed BEFORE alias update
+        try:
+            record_promotion_audit(audit_payload, database_path=audit_db_path)
+        except Exception as exc:
+            logger.exception(
+                "Promotion audit logging failed: %s; aborting promotion", exc
+            )
+            return PromotionDecision(
+                approved=False,
+                reason="audit_logging_failed",
+                candidate_f1=decision.candidate_f1,
+                champion_f1=decision.champion_f1,
+                benchmark_version=decision.benchmark_version,
+                margin=decision.margin,
+                benchmark_digest=decision.benchmark_digest,
+                candidate_metrics=decision.candidate_metrics,
+                champion_metrics=decision.champion_metrics,
+                gate_outcomes=decision.gate_outcomes,
+                candidate_version=candidate_version,
+                champion_version=champion_version,
+                candidate_run_id=candidate_run_id,
+                timestamp=timestamp,
+                audit_id=audit_id,
+            )
+
+        # 2. MLflow traceability logging if active run exists
+        try:
+            active_run = mlflow.active_run()
+            if active_run is not None:
+                log_promotion_traceability_to_mlflow(audit_payload)
+        except Exception as exc:
+            logger.exception(
+                "MLflow promotion traceability logging failed: %s; aborting promotion",
+                exc,
+            )
+            return PromotionDecision(
+                approved=False,
+                reason="audit_logging_failed",
+                candidate_f1=decision.candidate_f1,
+                champion_f1=decision.champion_f1,
+                benchmark_version=decision.benchmark_version,
+                margin=decision.margin,
+                benchmark_digest=decision.benchmark_digest,
+                candidate_metrics=decision.candidate_metrics,
+                champion_metrics=decision.champion_metrics,
+                gate_outcomes=decision.gate_outcomes,
+                candidate_version=candidate_version,
+                champion_version=champion_version,
+                candidate_run_id=candidate_run_id,
+                timestamp=timestamp,
+                audit_id=audit_id,
+            )
+
+        # 3. Both succeed: safe to update champion alias
+        if client is not None:
+            client.set_registered_model_alias(
+                model_name,
+                alias,
+                str(candidate_version),
+            )
+
+        return PromotionDecision(
+            approved=True,
+            reason=decision.reason,
+            candidate_f1=decision.candidate_f1,
+            champion_f1=decision.champion_f1,
+            benchmark_version=decision.benchmark_version,
+            margin=decision.margin,
+            benchmark_digest=decision.benchmark_digest,
+            candidate_metrics=decision.candidate_metrics,
+            champion_metrics=decision.champion_metrics,
+            gate_outcomes=decision.gate_outcomes,
+            candidate_version=candidate_version,
+            champion_version=champion_version,
+            candidate_run_id=candidate_run_id,
+            timestamp=timestamp,
+            audit_id=audit_id,
+        )
+
+    # For rejected decisions: persist audit and return decision
+    try:
+        record_promotion_audit(audit_payload, database_path=audit_db_path)
+    except Exception as exc:
+        logger.exception("Failed to record rejected promotion audit: %s", exc)
+
+    try:
+        active_run = mlflow.active_run()
+        if active_run is not None:
+            log_promotion_traceability_to_mlflow(audit_payload)
+    except Exception as exc:
+        logger.exception(
+            "Failed to log rejected promotion traceability to MLflow: %s", exc
+        )
+
+    return PromotionDecision(
+        approved=False,
+        reason=decision.reason,
+        candidate_f1=decision.candidate_f1,
+        champion_f1=decision.champion_f1,
+        benchmark_version=decision.benchmark_version,
+        margin=decision.margin,
+        benchmark_digest=decision.benchmark_digest,
+        candidate_metrics=decision.candidate_metrics,
+        champion_metrics=decision.champion_metrics,
+        gate_outcomes=decision.gate_outcomes,
+        candidate_version=candidate_version,
+        champion_version=champion_version,
+        candidate_run_id=candidate_run_id,
+        timestamp=timestamp,
+        audit_id=audit_id,
+    )
+
+
 def promote_model(
     candidate_version: int | str,
     candidate_f1: float | None = None,
@@ -280,6 +464,8 @@ def promote_model(
     min_samples: int | None = None,
     candidate_benchmark_version: str | None = None,
     champion_benchmark_version: str | None = None,
+    candidate_run_id: str | None = None,
+    audit_db_path: str | Path | None = None,
 ) -> PromotionDecision:
     """Promote a registered model version only if every promotion gate passes.
 
@@ -294,6 +480,9 @@ def promote_model(
         settings.promotion_f1_margin if min_improvement is None else min_improvement
     )
     min_samples = settings.benchmark_min_samples if min_samples is None else min_samples
+
+    gate_outcomes: dict[str, Any] = {}
+    actual_benchmark_digest: str | None = None
 
     # 1. Resolve and validate shared benchmark dataset
     resolved_benchmark_df = benchmark_df
@@ -310,14 +499,30 @@ def promote_model(
             )
             resolved_benchmark_df = bench_dataset.data
             resolved_benchmark_version = bench_dataset.version
+            actual_benchmark_digest = bench_dataset.digest
         except FileNotFoundError:
-            return PromotionDecision(
+            gate_outcomes["benchmark_integrity"] = {
+                "passed": False,
+                "reason": "benchmark_missing",
+            }
+            dec = PromotionDecision(
                 approved=False,
                 reason="benchmark_missing",
                 candidate_f1=0.0,
                 champion_f1=None,
                 benchmark_version=resolved_benchmark_version,
                 margin=min_improvement,
+                gate_outcomes=gate_outcomes,
+            )
+            return _persist_audit_and_finalize(
+                dec,
+                model_name=model_name,
+                alias=alias,
+                candidate_version=candidate_version,
+                candidate_run_id=candidate_run_id,
+                champion_version=None,
+                audit_db_path=audit_db_path,
+                candidate_training_df=candidate_training_df,
             )
         except ValueError as exc:
             msg = str(exc).lower()
@@ -326,15 +531,31 @@ def promote_model(
                 if "digest mismatch" in msg
                 else "benchmark_invalid"
             )
-            return PromotionDecision(
+            gate_outcomes["benchmark_integrity"] = {
+                "passed": False,
+                "reason": reason,
+            }
+            dec = PromotionDecision(
                 approved=False,
                 reason=reason,
                 candidate_f1=0.0,
                 champion_f1=None,
                 benchmark_version=resolved_benchmark_version,
                 margin=min_improvement,
+                gate_outcomes=gate_outcomes,
+            )
+            return _persist_audit_and_finalize(
+                dec,
+                model_name=model_name,
+                alias=alias,
+                candidate_version=candidate_version,
+                candidate_run_id=candidate_run_id,
+                champion_version=None,
+                audit_db_path=audit_db_path,
+                candidate_training_df=candidate_training_df,
             )
     else:
+        actual_benchmark_digest = compute_dataframe_sha256(resolved_benchmark_df)
         try:
             validate_benchmark_data(
                 resolved_benchmark_df,
@@ -351,69 +572,169 @@ def promote_model(
                 reason = "benchmark_insufficient_samples"
             else:
                 reason = "benchmark_invalid"
-            return PromotionDecision(
+            gate_outcomes["benchmark_integrity"] = {
+                "passed": False,
+                "reason": reason,
+            }
+            dec = PromotionDecision(
                 approved=False,
                 reason=reason,
                 candidate_f1=0.0,
                 champion_f1=None,
                 benchmark_version=resolved_benchmark_version,
                 margin=min_improvement,
+                benchmark_digest=actual_benchmark_digest,
+                gate_outcomes=gate_outcomes,
+            )
+            return _persist_audit_and_finalize(
+                dec,
+                model_name=model_name,
+                alias=alias,
+                candidate_version=candidate_version,
+                candidate_run_id=candidate_run_id,
+                champion_version=None,
+                audit_db_path=audit_db_path,
+                candidate_training_df=candidate_training_df,
             )
         except TypeError:
-            return PromotionDecision(
+            gate_outcomes["benchmark_integrity"] = {
+                "passed": False,
+                "reason": "benchmark_invalid",
+            }
+            dec = PromotionDecision(
                 approved=False,
                 reason="benchmark_invalid",
                 candidate_f1=0.0,
                 champion_f1=None,
                 benchmark_version=resolved_benchmark_version,
                 margin=min_improvement,
+                benchmark_digest=actual_benchmark_digest,
+                gate_outcomes=gate_outcomes,
             )
+            return _persist_audit_and_finalize(
+                dec,
+                model_name=model_name,
+                alias=alias,
+                candidate_version=candidate_version,
+                candidate_run_id=candidate_run_id,
+                champion_version=None,
+                audit_db_path=audit_db_path,
+                candidate_training_df=candidate_training_df,
+            )
+
+    gate_outcomes["benchmark_integrity"] = {
+        "passed": True,
+        "benchmark_version": resolved_benchmark_version,
+        "benchmark_digest": actual_benchmark_digest,
+        "sample_count": len(resolved_benchmark_df),
+    }
 
     # 2. Enforce training/benchmark separation (Fail closed)
     if candidate_training_df is None:
-        return PromotionDecision(
+        gate_outcomes["separation_and_overlap"] = {
+            "passed": False,
+            "reason": "separation_not_established",
+        }
+        dec = PromotionDecision(
             approved=False,
             reason="separation_not_established",
             candidate_f1=0.0,
             champion_f1=None,
             benchmark_version=resolved_benchmark_version,
             margin=min_improvement,
+            benchmark_digest=actual_benchmark_digest,
+            gate_outcomes=gate_outcomes,
+        )
+        return _persist_audit_and_finalize(
+            dec,
+            model_name=model_name,
+            alias=alias,
+            candidate_version=candidate_version,
+            candidate_run_id=candidate_run_id,
+            champion_version=None,
+            audit_db_path=audit_db_path,
+            candidate_training_df=candidate_training_df,
         )
 
     if check_training_benchmark_overlap(candidate_training_df, resolved_benchmark_df):
-        return PromotionDecision(
+        gate_outcomes["separation_and_overlap"] = {
+            "passed": False,
+            "reason": "training_benchmark_overlap",
+        }
+        dec = PromotionDecision(
             approved=False,
             reason="training_benchmark_overlap",
             candidate_f1=0.0,
             champion_f1=None,
             benchmark_version=resolved_benchmark_version,
             margin=min_improvement,
+            benchmark_digest=actual_benchmark_digest,
+            gate_outcomes=gate_outcomes,
         )
+        return _persist_audit_and_finalize(
+            dec,
+            model_name=model_name,
+            alias=alias,
+            candidate_version=candidate_version,
+            candidate_run_id=candidate_run_id,
+            champion_version=None,
+            audit_db_path=audit_db_path,
+            candidate_training_df=candidate_training_df,
+        )
+
+    gate_outcomes["separation_and_overlap"] = {"passed": True}
 
     # 3. Evaluate candidate model on shared benchmark records
     if candidate_model is None:
-        return PromotionDecision(
+        gate_outcomes["candidate_evaluation"] = {
+            "passed": False,
+            "reason": "candidate_model_missing",
+        }
+        dec = PromotionDecision(
             approved=False,
             reason="candidate_model_missing",
             candidate_f1=0.0,
             champion_f1=None,
             benchmark_version=resolved_benchmark_version,
             margin=min_improvement,
+            benchmark_digest=actual_benchmark_digest,
+            gate_outcomes=gate_outcomes,
+        )
+        return _persist_audit_and_finalize(
+            dec,
+            model_name=model_name,
+            alias=alias,
+            candidate_version=candidate_version,
+            candidate_run_id=candidate_run_id,
+            champion_version=None,
+            audit_db_path=audit_db_path,
+            candidate_training_df=candidate_training_df,
         )
 
     cand_eval = evaluate_model_on_benchmark(candidate_model, resolved_benchmark_df)
     computed_candidate_f1 = cand_eval["f1_score"]
+    gate_outcomes["candidate_evaluation"] = {
+        "passed": True,
+        "metrics": cand_eval,
+    }
 
     # 4. Lookup champion and evaluate on the exact same benchmark records
     client = MlflowClient()
+    champion_version = None
+    champ_eval = None
 
     try:
-        client.get_model_version_by_alias(model_name, alias)
+        champ_ver_obj = client.get_model_version_by_alias(model_name, alias)
+        champion_version = str(champ_ver_obj.version)
     except MlflowException as exc:
         missing_alias_code = ErrorCode.Name(ErrorCode.RESOURCE_DOES_NOT_EXIST)
         if exc.error_code != missing_alias_code:
             raise
         champion_f1 = None
+        gate_outcomes["champion_evaluation"] = {
+            "passed": True,
+            "champion_present": False,
+        }
     else:
         # Champion exists: evaluate on the shared benchmark
         if champion_model is not None:
@@ -429,18 +750,44 @@ def promote_model(
                 )
                 champion_f1 = champ_eval["f1_score"]
             except Exception:
-                # If champion cannot be evaluated on the shared benchmark, fail closed
-                return PromotionDecision(
+                gate_outcomes["champion_evaluation"] = {
+                    "passed": False,
+                    "champion_present": True,
+                    "champion_version": champion_version,
+                    "reason": "champion_benchmark_evaluation_failed",
+                }
+                dec = PromotionDecision(
                     approved=False,
                     reason="champion_benchmark_evaluation_failed",
                     candidate_f1=computed_candidate_f1,
                     champion_f1=None,
                     benchmark_version=resolved_benchmark_version,
                     margin=min_improvement,
+                    benchmark_digest=actual_benchmark_digest,
+                    candidate_metrics=cand_eval,
+                    gate_outcomes=gate_outcomes,
+                )
+                return _persist_audit_and_finalize(
+                    dec,
+                    model_name=model_name,
+                    alias=alias,
+                    candidate_version=candidate_version,
+                    candidate_run_id=candidate_run_id,
+                    champion_version=champion_version,
+                    audit_db_path=audit_db_path,
+                    candidate_training_df=candidate_training_df,
+                    client=client,
                 )
 
+        gate_outcomes["champion_evaluation"] = {
+            "passed": True,
+            "champion_present": True,
+            "champion_version": champion_version,
+            "metrics": champ_eval,
+        }
+
     # 5. Evaluate promotion gate
-    decision = evaluate_promotion(
+    gate_decision = evaluate_promotion(
         computed_candidate_f1,
         champion_f1,
         minimum_f1=minimum_f1,
@@ -451,11 +798,39 @@ def promote_model(
         or resolved_benchmark_version,
     )
 
-    if decision.approved:
-        client.set_registered_model_alias(
-            model_name,
-            alias,
-            str(candidate_version),
-        )
+    gate_outcomes["quality_gate"] = {
+        "passed": gate_decision.approved,
+        "reason": gate_decision.reason,
+        "candidate_f1": computed_candidate_f1,
+        "champion_f1": champion_f1,
+        "minimum_f1": minimum_f1,
+        "margin": min_improvement,
+    }
 
-    return decision
+    dec = PromotionDecision(
+        approved=gate_decision.approved,
+        reason=gate_decision.reason,
+        candidate_f1=gate_decision.candidate_f1,
+        champion_f1=gate_decision.champion_f1,
+        benchmark_version=gate_decision.benchmark_version,
+        margin=gate_decision.margin,
+        benchmark_digest=actual_benchmark_digest,
+        candidate_metrics=cand_eval,
+        champion_metrics=champ_eval,
+        gate_outcomes=gate_outcomes,
+        candidate_version=candidate_version,
+        champion_version=champion_version,
+        candidate_run_id=candidate_run_id,
+    )
+
+    return _persist_audit_and_finalize(
+        dec,
+        model_name=model_name,
+        alias=alias,
+        candidate_version=candidate_version,
+        candidate_run_id=candidate_run_id,
+        champion_version=champion_version,
+        audit_db_path=audit_db_path,
+        candidate_training_df=candidate_training_df,
+        client=client,
+    )

@@ -80,3 +80,14 @@ def test_benchmark_settings_read_environment_variables(monkeypatch):
     assert config.benchmark_min_samples == 50
     assert config.benchmark_version == "2026-q4"
     assert config.benchmark_expected_sha256 == "custom_sha256_digest_value"
+
+
+def test_promotion_audit_settings(monkeypatch):
+    """Verify default and overridden values for promotion audit database path."""
+    monkeypatch.delenv("MODELFORGE_PROMOTION_AUDIT_DB_PATH", raising=False)
+    config = Settings(_env_file=None)
+    assert config.promotion_audit_db_path == "data/lifecycle_audit.db"
+
+    monkeypatch.setenv("MODELFORGE_PROMOTION_AUDIT_DB_PATH", "data/custom_audit.db")
+    custom_config = Settings(_env_file=None)
+    assert custom_config.promotion_audit_db_path == "data/custom_audit.db"
