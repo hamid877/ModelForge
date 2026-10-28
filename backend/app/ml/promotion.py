@@ -290,7 +290,15 @@ def _persist_audit_and_finalize(
     candidate_training_df: pd.DataFrame | None,
     client: MlflowClient | None = None,
 ) -> PromotionDecision:
-    """Safely record audit and set alias only if approved and audit succeeds."""
+    """Safely record audit and set alias only if approved and audit succeeds.
+
+    Limitation: If the remote registry alias is confirmed to point to the
+    candidate version after a mutation exception, but SQLite audit persistence
+    fails during reconciliation, the decision returns approved=False with
+    reason='audit_logging_failed' to prevent claiming a fully audited promotion,
+    while preserving the verified registry state in
+    gate_outcomes['alias_reconciliation'].
+    """
     timestamp = datetime.now(UTC).isoformat()
     audit_id = str(uuid4())
 
@@ -369,6 +377,16 @@ def _persist_audit_and_finalize(
                 "MLflow promotion traceability logging failed: %s; aborting promotion",
                 exc,
             )
+            failed_payload = dict(audit_payload)
+            failed_payload["approved"] = False
+            failed_payload["reason"] = "audit_logging_failed"
+            try:
+                record_promotion_audit(failed_payload, database_path=audit_db_path)
+            except Exception as audit_exc:
+                logger.exception(
+                    "Failed to update audit record after MLflow failure: %s",
+                    audit_exc,
+                )
             return PromotionDecision(
                 approved=False,
                 reason="audit_logging_failed",
@@ -389,11 +407,180 @@ def _persist_audit_and_finalize(
 
         # 3. Both succeed: safe to update champion alias
         if client is not None:
-            client.set_registered_model_alias(
-                model_name,
-                alias,
-                str(candidate_version),
-            )
+            try:
+                client.set_registered_model_alias(
+                    model_name,
+                    alias,
+                    str(candidate_version),
+                )
+            except Exception as exc:
+                logger.exception(
+                    "Model alias mutation encountered exception: %s; "
+                    "reconciling registry state",
+                    exc,
+                )
+                # Re-read current alias using existing client to determine remote state
+                alias_state: str  # "candidate", "previous_champion", or "unverified"
+                try:
+                    current_ver_obj = client.get_model_version_by_alias(
+                        model_name, alias
+                    )
+                    current_version = str(current_ver_obj.version)
+                    if current_version == str(candidate_version):
+                        alias_state = "candidate"
+                    elif champion_version is not None and current_version == str(
+                        champion_version
+                    ):
+                        alias_state = "previous_champion"
+                    else:
+                        logger.error(
+                            "Model alias points to unexpected version %s (expected "
+                            "candidate %s or champion %s); state is unverified.",
+                            current_version,
+                            candidate_version,
+                            champion_version,
+                        )
+                        alias_state = "unverified"
+                except MlflowException as mlflow_err:
+                    missing_alias_code = ErrorCode.Name(
+                        ErrorCode.RESOURCE_DOES_NOT_EXIST
+                    )
+                    if (
+                        mlflow_err.error_code == missing_alias_code
+                        and champion_version is None
+                    ):
+                        alias_state = "previous_champion"
+                    else:
+                        logger.exception(
+                            "Failed to verify model alias state after mutation error: "
+                            "%s; actual registry state requires reconciliation",
+                            mlflow_err,
+                        )
+                        alias_state = "unverified"
+                except Exception as verify_err:
+                    logger.exception(
+                        "Failed to verify model alias state after mutation error: %s; "
+                        "actual registry state requires reconciliation",
+                        verify_err,
+                    )
+                    alias_state = "unverified"
+
+                if alias_state == "candidate":
+                    logger.warning(
+                        "Model alias mutation raised exception (%s) but remote alias "
+                        "points to candidate version %s; promotion actually took "
+                        "effect.",
+                        exc,
+                        candidate_version,
+                    )
+                    reconciled_payload = dict(audit_payload)
+                    reconciled_payload["approved"] = True
+                    reconciled_payload["reason"] = decision.reason
+                    try:
+                        record_promotion_audit(
+                            reconciled_payload, database_path=audit_db_path
+                        )
+                    except Exception as audit_exc:
+                        logger.exception(
+                            "Failed to persist reconciled audit record: %s. "
+                            "Limitation: remote registry alias points to candidate %s, "
+                            "but local audit persistence failed.",
+                            audit_exc,
+                            candidate_version,
+                        )
+                        reconciled_gate_outcomes = dict(decision.gate_outcomes or {})
+                        reconciled_gate_outcomes["alias_reconciliation"] = {
+                            "alias_verified": True,
+                            "candidate_version": str(candidate_version),
+                            "audit_persistence_failed": True,
+                        }
+                        return PromotionDecision(
+                            approved=False,
+                            reason="audit_logging_failed",
+                            candidate_f1=decision.candidate_f1,
+                            champion_f1=decision.champion_f1,
+                            benchmark_version=decision.benchmark_version,
+                            margin=decision.margin,
+                            benchmark_digest=decision.benchmark_digest,
+                            candidate_metrics=decision.candidate_metrics,
+                            champion_metrics=decision.champion_metrics,
+                            gate_outcomes=reconciled_gate_outcomes,
+                            candidate_version=candidate_version,
+                            champion_version=champion_version,
+                            candidate_run_id=candidate_run_id,
+                            timestamp=timestamp,
+                            audit_id=audit_id,
+                        )
+
+                    return PromotionDecision(
+                        approved=True,
+                        reason=decision.reason,
+                        candidate_f1=decision.candidate_f1,
+                        champion_f1=decision.champion_f1,
+                        benchmark_version=decision.benchmark_version,
+                        margin=decision.margin,
+                        benchmark_digest=decision.benchmark_digest,
+                        candidate_metrics=decision.candidate_metrics,
+                        champion_metrics=decision.champion_metrics,
+                        gate_outcomes=decision.gate_outcomes,
+                        candidate_version=candidate_version,
+                        champion_version=champion_version,
+                        candidate_run_id=candidate_run_id,
+                        timestamp=timestamp,
+                        audit_id=audit_id,
+                    )
+
+                failure_reason = (
+                    "alias_state_unverified"
+                    if alias_state == "unverified"
+                    else "alias_mutation_failed"
+                )
+                if failure_reason == "alias_state_unverified":
+                    logger.error(
+                        "Model alias mutation raised exception and alias state "
+                        "could not be verified; actual registry state requires "
+                        "reconciliation."
+                    )
+
+                failed_payload = dict(audit_payload)
+                failed_payload["approved"] = False
+                failed_payload["reason"] = failure_reason
+                try:
+                    record_promotion_audit(failed_payload, database_path=audit_db_path)
+                except Exception as audit_exc:
+                    logger.exception(
+                        "Failed to update audit record after alias failure: %s. "
+                        "Note: audit database may remain stale if persistence "
+                        "fails.",
+                        audit_exc,
+                    )
+                try:
+                    active_run = mlflow.active_run()
+                    if active_run is not None:
+                        log_promotion_traceability_to_mlflow(failed_payload)
+                except Exception as mlflow_exc:
+                    logger.exception(
+                        "Failed to update MLflow traceability after alias failure: %s",
+                        mlflow_exc,
+                    )
+
+                return PromotionDecision(
+                    approved=False,
+                    reason=failure_reason,
+                    candidate_f1=decision.candidate_f1,
+                    champion_f1=decision.champion_f1,
+                    benchmark_version=decision.benchmark_version,
+                    margin=decision.margin,
+                    benchmark_digest=decision.benchmark_digest,
+                    candidate_metrics=decision.candidate_metrics,
+                    champion_metrics=decision.champion_metrics,
+                    gate_outcomes=decision.gate_outcomes,
+                    candidate_version=candidate_version,
+                    champion_version=champion_version,
+                    candidate_run_id=candidate_run_id,
+                    timestamp=timestamp,
+                    audit_id=audit_id,
+                )
 
         return PromotionDecision(
             approved=True,

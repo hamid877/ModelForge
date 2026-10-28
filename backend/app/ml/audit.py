@@ -163,7 +163,7 @@ def record_promotion_audit(
         )
         connection.execute(
             """
-            INSERT INTO promotion_audit (
+            INSERT OR REPLACE INTO promotion_audit (
                 audit_id, timestamp, model_name, candidate_version,
                 candidate_run_id, champion_version, approved, reason,
                 candidate_f1, champion_f1, benchmark_version,
