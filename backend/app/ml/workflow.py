@@ -11,7 +11,14 @@ from backend.app.ml.promotion import (
     load_benchmark_dataset,
     promote_model,
 )
-from backend.app.ml.tracking import setup_mlflow
+from backend.app.ml.provenance import (
+    build_split_details,
+    extract_dataset_provenance,
+)
+from backend.app.ml.tracking import (
+    log_dataset_provenance_to_mlflow,
+    setup_mlflow,
+)
 from backend.app.ml.training import (
     TrainingConfig,
     save_model,
@@ -40,6 +47,18 @@ def run_training(
 
         train_df = X_train.copy()
         train_df["churn"] = y_train
+        test_df = X_test.copy()
+        test_df["churn"] = y_test
+
+        split_info = build_split_details(
+            train_df=train_df,
+            test_df=test_df,
+            test_size=config.test_size,
+            random_state=config.random_state,
+            stratified=True,
+        )
+        provenance = extract_dataset_provenance(df, split_details=split_info)
+        log_dataset_provenance_to_mlflow(provenance.to_dict())
 
         model = train_churn_model(train_df, config)
         metrics = evaluate_churn_model(model, X_test, y_test)
@@ -79,7 +98,7 @@ def run_training_and_promote(
 
     setup_mlflow()
     run_name = f"logistic-regression-c{config.c:g}"
-    with mlflow.start_run(run_name=run_name):
+    with mlflow.start_run(run_name=run_name) as run:
         mlflow.set_tag("model_family", "logistic_regression")
         mlflow.set_tag("dataset", "churn")
         mlflow.set_tag("stage", "candidate")
@@ -88,6 +107,18 @@ def run_training_and_promote(
 
         train_df = X_train.copy()
         train_df["churn"] = y_train
+        test_df = X_test.copy()
+        test_df["churn"] = y_test
+
+        split_info = build_split_details(
+            train_df=train_df,
+            test_df=test_df,
+            test_size=config.test_size,
+            random_state=config.random_state,
+            stratified=True,
+        )
+        provenance = extract_dataset_provenance(df, split_details=split_info)
+        log_dataset_provenance_to_mlflow(provenance.to_dict())
 
         model = train_churn_model(train_df, config)
         metrics = evaluate_churn_model(model, X_test, y_test)
@@ -134,6 +165,7 @@ def run_training_and_promote(
             except Exception:
                 resolved_benchmark_df = None
 
+        candidate_run_id = getattr(getattr(run, "info", None), "run_id", None)
         decision = promote_model(
             candidate_version=candidate_version,
             candidate_f1=metrics["f1_score"],
@@ -143,6 +175,7 @@ def run_training_and_promote(
             benchmark_version=resolved_benchmark_version,
             model_name=settings.model_name,
             alias=settings.model_alias,
+            candidate_run_id=candidate_run_id,
         )
 
     return metrics, decision
