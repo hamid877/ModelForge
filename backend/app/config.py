@@ -38,6 +38,10 @@ class Settings(BaseSettings):
         default="data/lifecycle_audit.db",
         min_length=1,
     )
+    promotion_audit_db_path: str = Field(
+        default="data/lifecycle_audit.db",
+        min_length=1,
+    )
 
     # Promotion quality gate and shared benchmark settings
     # Note: Requiring an F1 improvement margin prevents accidental promotions
