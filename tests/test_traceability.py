@@ -434,6 +434,286 @@ def test_promote_model_aborts_promotion_on_mlflow_logging_failure(
     assert decision.reason == "audit_logging_failed"
     client.set_registered_model_alias.assert_not_called()
 
+    # CRITICAL: SQLite audit record was updated to reflect aborted status,
+    # not false approval
+    records = get_promotion_audit_records(tmp_path / "audit.db")
+    assert len(records) == 1
+    assert records[0]["approved"] is False
+    assert records[0]["reason"] == "audit_logging_failed"
+
+
+def test_promote_model_aborts_and_updates_audit_on_alias_mutation_failure(
+    sample_training_df, sample_benchmark_df, tmp_path
+):
+    """SAFETY: If alias mutation fails, candidate is rejected and audit
+    reflects failure.
+    """
+    db_path = tmp_path / "audit.db"
+    candidate_model = DeterministicEstimator(sample_benchmark_df["churn"])
+    champion_model = DeterministicEstimator(
+        sample_benchmark_df["churn"], error_indices=[0, 1]
+    )
+    champion_stub = type("ModelVersionStub", (), {"version": "2"})()
+
+    active_run_mock = MagicMock()
+
+    with (
+        patch("backend.app.ml.promotion.MlflowClient") as mock_client,
+        patch(
+            "backend.app.ml.promotion.mlflow.active_run",
+            return_value=active_run_mock,
+        ),
+        patch(
+            "backend.app.ml.promotion.log_promotion_traceability_to_mlflow"
+        ) as mock_log_mlflow,
+    ):
+        client = mock_client.return_value
+        client.get_model_version_by_alias.return_value = champion_stub
+        client.set_registered_model_alias.side_effect = RuntimeError(
+            "MLflow registry unavailable"
+        )
+
+        decision = promote_model(
+            candidate_version=8,
+            candidate_training_df=sample_training_df,
+            candidate_model=candidate_model,
+            champion_model=champion_model,
+            benchmark_df=sample_benchmark_df,
+            benchmark_version="v1",
+            model_name="churn-classifier",
+            alias="champion",
+            minimum_f1=0.70,
+            min_improvement=0.01,
+            audit_db_path=db_path,
+        )
+
+    assert decision.approved is False
+    assert decision.reason == "alias_mutation_failed"
+    client.set_registered_model_alias.assert_called_once_with(
+        "churn-classifier", "champion", "8"
+    )
+
+    # CRITICAL: Audit record in SQLite must NOT falsely claim success!
+    records = get_promotion_audit_records(db_path)
+    assert len(records) == 1
+    assert records[0]["approved"] is False
+    assert records[0]["reason"] == "alias_mutation_failed"
+    assert records[0]["candidate_version"] == "8"
+
+    # MLflow active run should receive compensated failure update
+    assert mock_log_mlflow.call_count == 2
+    second_call_record = mock_log_mlflow.call_args_list[1][0][0]
+    assert second_call_record["approved"] is False
+    assert second_call_record["reason"] == "alias_mutation_failed"
+
+
+def test_promote_model_reconciles_when_candidate_alias_found_after_exception(
+    sample_training_df, sample_benchmark_df, tmp_path
+):
+    """Reconciliation: If set_alias raises but re-read shows candidate,
+    promotion succeeds.
+    """
+    db_path = tmp_path / "audit.db"
+    candidate_model = DeterministicEstimator(sample_benchmark_df["churn"])
+    champion_model = DeterministicEstimator(
+        sample_benchmark_df["churn"], error_indices=[0, 1]
+    )
+    initial_champ_stub = type("ModelVersionStub", (), {"version": "2"})()
+    reconciled_cand_stub = type("ModelVersionStub", (), {"version": "8"})()
+
+    with patch("backend.app.ml.promotion.MlflowClient") as mock_client:
+        client = mock_client.return_value
+        # Initial champion check returns "2", post-mutation check returns "8"
+        client.get_model_version_by_alias.side_effect = [
+            initial_champ_stub,
+            reconciled_cand_stub,
+        ]
+        client.set_registered_model_alias.side_effect = RuntimeError(
+            "Socket timeout after server committed update"
+        )
+
+        decision = promote_model(
+            candidate_version=8,
+            candidate_training_df=sample_training_df,
+            candidate_model=candidate_model,
+            champion_model=champion_model,
+            benchmark_df=sample_benchmark_df,
+            benchmark_version="v1",
+            model_name="churn-classifier",
+            alias="champion",
+            minimum_f1=0.70,
+            min_improvement=0.01,
+            audit_db_path=db_path,
+        )
+
+    assert decision.approved is True
+    assert decision.reason == "candidate_meets_quality_gate"
+    assert decision.candidate_version == 8
+
+    records = get_promotion_audit_records(db_path)
+    assert len(records) == 1
+    assert records[0]["approved"] is True
+    assert records[0]["reason"] == "candidate_meets_quality_gate"
+    assert records[0]["candidate_version"] == "8"
+
+
+def test_promote_model_records_unverified_when_alias_lookup_fails(
+    sample_training_df, sample_benchmark_df, tmp_path
+):
+    """Reconciliation: If alias state cannot be verified, record unverified reason."""
+    db_path = tmp_path / "audit.db"
+    candidate_model = DeterministicEstimator(sample_benchmark_df["churn"])
+    champion_model = DeterministicEstimator(
+        sample_benchmark_df["churn"], error_indices=[0, 1]
+    )
+    initial_champ_stub = type("ModelVersionStub", (), {"version": "2"})()
+
+    with patch("backend.app.ml.promotion.MlflowClient") as mock_client:
+        client = mock_client.return_value
+        # Initial check succeeds, post-mutation check raises error
+        client.get_model_version_by_alias.side_effect = [
+            initial_champ_stub,
+            RuntimeError("Registry connection completely down"),
+        ]
+        client.set_registered_model_alias.side_effect = RuntimeError(
+            "Registry write failed"
+        )
+
+        decision = promote_model(
+            candidate_version=8,
+            candidate_training_df=sample_training_df,
+            candidate_model=candidate_model,
+            champion_model=champion_model,
+            benchmark_df=sample_benchmark_df,
+            benchmark_version="v1",
+            model_name="churn-classifier",
+            alias="champion",
+            minimum_f1=0.70,
+            min_improvement=0.01,
+            audit_db_path=db_path,
+        )
+
+    assert decision.approved is False
+    assert decision.reason == "alias_state_unverified"
+
+    records = get_promotion_audit_records(db_path)
+    assert len(records) == 1
+    assert records[0]["approved"] is False
+    assert records[0]["reason"] == "alias_state_unverified"
+    assert records[0]["candidate_version"] == "8"
+
+
+def test_promote_model_records_unverified_when_unexpected_third_version_found(
+    sample_training_df, sample_benchmark_df, tmp_path
+):
+    """Reconciliation: If alias points to an unexpected third version,
+    classify as unverified.
+    """
+    db_path = tmp_path / "audit.db"
+    candidate_model = DeterministicEstimator(sample_benchmark_df["churn"])
+    champion_model = DeterministicEstimator(
+        sample_benchmark_df["churn"], error_indices=[0, 1]
+    )
+    initial_champ_stub = type("ModelVersionStub", (), {"version": "2"})()
+    unexpected_third_stub = type("ModelVersionStub", (), {"version": "99"})()
+
+    with patch("backend.app.ml.promotion.MlflowClient") as mock_client:
+        client = mock_client.return_value
+        client.get_model_version_by_alias.side_effect = [
+            initial_champ_stub,
+            unexpected_third_stub,
+        ]
+        client.set_registered_model_alias.side_effect = RuntimeError("Connection reset")
+
+        decision = promote_model(
+            candidate_version=8,
+            candidate_training_df=sample_training_df,
+            candidate_model=candidate_model,
+            champion_model=champion_model,
+            benchmark_df=sample_benchmark_df,
+            benchmark_version="v1",
+            model_name="churn-classifier",
+            alias="champion",
+            minimum_f1=0.70,
+            min_improvement=0.01,
+            audit_db_path=db_path,
+        )
+
+    assert decision.approved is False
+    assert decision.reason == "alias_state_unverified"
+
+    records = get_promotion_audit_records(db_path)
+    assert len(records) == 1
+    assert records[0]["approved"] is False
+    assert records[0]["reason"] == "alias_state_unverified"
+    assert records[0]["candidate_version"] == "8"
+
+
+def test_promote_model_handles_audit_persistence_failure_when_candidate_alias_confirmed(
+    sample_training_df, sample_benchmark_df, tmp_path
+):
+    """Reconciliation: If candidate alias confirmed but audit write fails,
+    abort approval.
+    """
+    db_path = tmp_path / "audit.db"
+    candidate_model = DeterministicEstimator(sample_benchmark_df["churn"])
+    champion_model = DeterministicEstimator(
+        sample_benchmark_df["churn"], error_indices=[0, 1]
+    )
+    initial_champ_stub = type("ModelVersionStub", (), {"version": "2"})()
+    reconciled_cand_stub = type("ModelVersionStub", (), {"version": "8"})()
+
+    real_record_fn = record_promotion_audit
+    call_count = 0
+
+    def mock_record_promotion_audit(payload, database_path=None):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return real_record_fn(payload, database_path=database_path)
+        raise sqlite3.OperationalError("disk I/O error during reconciliation")
+
+    with (
+        patch("backend.app.ml.promotion.MlflowClient") as mock_client,
+        patch(
+            "backend.app.ml.promotion.record_promotion_audit",
+            side_effect=mock_record_promotion_audit,
+        ),
+    ):
+        client = mock_client.return_value
+        client.get_model_version_by_alias.side_effect = [
+            initial_champ_stub,
+            reconciled_cand_stub,
+        ]
+        client.set_registered_model_alias.side_effect = RuntimeError(
+            "Socket timeout after commit"
+        )
+
+        decision = promote_model(
+            candidate_version=8,
+            candidate_training_df=sample_training_df,
+            candidate_model=candidate_model,
+            champion_model=champion_model,
+            benchmark_df=sample_benchmark_df,
+            benchmark_version="v1",
+            model_name="churn-classifier",
+            alias="champion",
+            minimum_f1=0.70,
+            min_improvement=0.01,
+            audit_db_path=db_path,
+        )
+
+    # Must NOT report an entirely successful, fully audited promotion
+    assert decision.approved is False
+    assert decision.reason == "audit_logging_failed"
+    # Preserves verified registry state in gate outcomes
+    assert decision.candidate_version == 8
+    assert decision.gate_outcomes["alias_reconciliation"]["alias_verified"] is True
+    assert (
+        decision.gate_outcomes["alias_reconciliation"]["audit_persistence_failed"]
+        is True
+    )
+
 
 def test_promote_model_audits_gate_failures_due_to_overlap(
     sample_benchmark_df, tmp_path
