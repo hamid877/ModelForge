@@ -91,3 +91,40 @@ def test_promotion_audit_settings(monkeypatch):
     monkeypatch.setenv("MODELFORGE_PROMOTION_AUDIT_DB_PATH", "data/custom_audit.db")
     custom_config = Settings(_env_file=None)
     assert custom_config.promotion_audit_db_path == "data/custom_audit.db"
+
+
+def test_retraining_orchestration_settings(monkeypatch):
+    """Verify default and overridden values for retraining orchestration settings."""
+    env_vars = [
+        "MODELFORGE_SQLITE_BUSY_TIMEOUT_MS",
+        "MODELFORGE_WORKER_LOCK_PATH",
+        "MODELFORGE_RETRAINING_LEASE_DURATION_SECONDS",
+        "MODELFORGE_RETRAINING_HEARTBEAT_INTERVAL_SECONDS",
+        "MODELFORGE_RETRAINING_MAX_ATTEMPTS",
+        "MODELFORGE_RETRAINING_POLL_INTERVAL_SECONDS",
+    ]
+    for var in env_vars:
+        monkeypatch.delenv(var, raising=False)
+
+    config = Settings(_env_file=None)
+    assert config.sqlite_busy_timeout_ms == 5000
+    assert config.worker_lock_path == "data/worker.lock"
+    assert config.retraining_lease_duration_seconds == 60
+    assert config.retraining_heartbeat_interval_seconds == 15
+    assert config.retraining_max_attempts == 3
+    assert config.retraining_poll_interval_seconds == 5.0
+
+    monkeypatch.setenv("MODELFORGE_SQLITE_BUSY_TIMEOUT_MS", "10000")
+    monkeypatch.setenv("MODELFORGE_WORKER_LOCK_PATH", "data/custom_worker.lock")
+    monkeypatch.setenv("MODELFORGE_RETRAINING_LEASE_DURATION_SECONDS", "120")
+    monkeypatch.setenv("MODELFORGE_RETRAINING_HEARTBEAT_INTERVAL_SECONDS", "30")
+    monkeypatch.setenv("MODELFORGE_RETRAINING_MAX_ATTEMPTS", "5")
+    monkeypatch.setenv("MODELFORGE_RETRAINING_POLL_INTERVAL_SECONDS", "2.5")
+
+    custom = Settings(_env_file=None)
+    assert custom.sqlite_busy_timeout_ms == 10000
+    assert custom.worker_lock_path == "data/custom_worker.lock"
+    assert custom.retraining_lease_duration_seconds == 120
+    assert custom.retraining_heartbeat_interval_seconds == 30
+    assert custom.retraining_max_attempts == 5
+    assert custom.retraining_poll_interval_seconds == 2.5
