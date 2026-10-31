@@ -42,6 +42,30 @@ class Settings(BaseSettings):
         default="data/lifecycle_audit.db",
         min_length=1,
     )
+    sqlite_busy_timeout_ms: int = Field(
+        default=5000,
+        ge=0,
+    )
+    worker_lock_path: str = Field(
+        default="data/worker.lock",
+        min_length=1,
+    )
+    retraining_lease_duration_seconds: int = Field(
+        default=60,
+        ge=1,
+    )
+    retraining_heartbeat_interval_seconds: int = Field(
+        default=15,
+        ge=1,
+    )
+    retraining_max_attempts: int = Field(
+        default=3,
+        ge=1,
+    )
+    retraining_poll_interval_seconds: float = Field(
+        default=5.0,
+        gt=0.0,
+    )
 
     # Promotion quality gate and shared benchmark settings
     # Note: Requiring an F1 improvement margin prevents accidental promotions

@@ -9,8 +9,34 @@ from typing import Any
 from uuid import uuid4
 
 from backend.app.config import settings
+from backend.app.ml.db import db_connection, get_db_connection
+from backend.app.ml.migrations import (
+    ACTIVE_JOB_STATUSES,
+    TERMINAL_JOB_STATUSES,
+    VALID_JOB_STATUSES,
+    VALID_RESOLUTIONS,
+    finalize_operator_resolution_atomic,
+    migrate_audit_database_idempotent,
+    validate_operator_resolution_inputs,
+)
 
 logger = logging.getLogger(__name__)
+
+__all__ = [
+    "ACTIVE_JOB_STATUSES",
+    "TERMINAL_JOB_STATUSES",
+    "VALID_JOB_STATUSES",
+    "VALID_RESOLUTIONS",
+    "AuditDatabaseError",
+    "db_connection",
+    "finalize_operator_resolution_atomic",
+    "get_db_connection",
+    "get_promotion_audit_records",
+    "migrate_audit_database_idempotent",
+    "record_lifecycle_run",
+    "record_promotion_audit",
+    "validate_operator_resolution_inputs",
+]
 
 
 class AuditDatabaseError(RuntimeError):
@@ -49,7 +75,7 @@ def record_lifecycle_run(
 
     serialized = json.dumps(payload, allow_nan=False)
 
-    with sqlite3.connect(path) as connection:
+    with db_connection(path) as connection:
         connection.execute(
             """
             CREATE TABLE IF NOT EXISTS lifecycle_audit (
@@ -120,6 +146,7 @@ def record_promotion_audit(
         if record.get("margin") is not None
         else settings.promotion_f1_margin
     )
+    job_id = str(record["job_id"]) if record.get("job_id") is not None else None
 
     payload_dict: dict[str, Any] = {
         "audit_id": audit_id,
@@ -138,6 +165,8 @@ def record_promotion_audit(
         "gate_outcomes": record.get("gate_outcomes", {}),
     }
 
+    if job_id is not None:
+        payload_dict["job_id"] = job_id
     if "candidate_metrics" in record and record["candidate_metrics"] is not None:
         payload_dict["candidate_metrics"] = record["candidate_metrics"]
     if "champion_metrics" in record and record["champion_metrics"] is not None:
@@ -147,7 +176,7 @@ def record_promotion_audit(
 
     serialized = json.dumps(payload_dict, allow_nan=False)
 
-    with sqlite3.connect(db_path) as connection:
+    with db_connection(db_path) as connection:
         connection.execute(
             """
             CREATE TABLE IF NOT EXISTS promotion_audit (
@@ -164,37 +193,70 @@ def record_promotion_audit(
                 benchmark_version TEXT NOT NULL,
                 benchmark_digest TEXT NOT NULL,
                 margin REAL NOT NULL,
+                job_id TEXT,
                 payload TEXT NOT NULL
             )
             """
         )
-        connection.execute(
-            """
-            INSERT OR REPLACE INTO promotion_audit (
-                audit_id, timestamp, model_name, candidate_version,
-                candidate_run_id, champion_version, approved, reason,
-                candidate_f1, champion_f1, benchmark_version,
-                benchmark_digest, margin, payload
+        cursor = connection.execute("PRAGMA table_info(promotion_audit);")
+        columns = {row[1] for row in cursor.fetchall()}
+        if "job_id" in columns:
+            connection.execute(
+                """
+                INSERT OR REPLACE INTO promotion_audit (
+                    audit_id, timestamp, model_name, candidate_version,
+                    candidate_run_id, champion_version, approved, reason,
+                    candidate_f1, champion_f1, benchmark_version,
+                    benchmark_digest, margin, job_id, payload
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    audit_id,
+                    timestamp,
+                    model_name,
+                    candidate_version,
+                    candidate_run_id,
+                    champion_version,
+                    approved,
+                    reason,
+                    candidate_f1,
+                    champion_f1,
+                    benchmark_version,
+                    benchmark_digest,
+                    margin,
+                    job_id,
+                    serialized,
+                ),
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                audit_id,
-                timestamp,
-                model_name,
-                candidate_version,
-                candidate_run_id,
-                champion_version,
-                approved,
-                reason,
-                candidate_f1,
-                champion_f1,
-                benchmark_version,
-                benchmark_digest,
-                margin,
-                serialized,
-            ),
-        )
+        else:
+            connection.execute(
+                """
+                INSERT OR REPLACE INTO promotion_audit (
+                    audit_id, timestamp, model_name, candidate_version,
+                    candidate_run_id, champion_version, approved, reason,
+                    candidate_f1, champion_f1, benchmark_version,
+                    benchmark_digest, margin, payload
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    audit_id,
+                    timestamp,
+                    model_name,
+                    candidate_version,
+                    candidate_run_id,
+                    champion_version,
+                    approved,
+                    reason,
+                    candidate_f1,
+                    champion_f1,
+                    benchmark_version,
+                    benchmark_digest,
+                    margin,
+                    serialized,
+                ),
+            )
 
     return {"audit_id": audit_id, "timestamp": timestamp}
 
@@ -211,8 +273,7 @@ def get_promotion_audit_records(
         return []
 
     try:
-        with sqlite3.connect(db_path) as connection:
-            connection.row_factory = sqlite3.Row
+        with db_connection(db_path, row_factory=sqlite3.Row) as connection:
             cursor = connection.execute(
                 """
                 SELECT audit_id, timestamp, model_name, candidate_version,
