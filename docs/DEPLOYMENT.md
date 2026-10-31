@@ -176,6 +176,51 @@ All settings use the `MODELFORGE_` prefix and are loaded by `pydantic-settings`:
 > it may cause bootstrap to fail on the provided dataset if the model cannot
 > exceed the new threshold.
 
+### Audit database configuration (`lifecycle_audit_db_path` vs. `promotion_audit_db_path`)
+
+By default, both `lifecycle_audit_db_path` and `promotion_audit_db_path` resolve to the same SQLite database file: `data/lifecycle_audit.db`.
+
+Within this single SQLite file, two distinct tables coexist with separate schemas and purposes:
+- **`lifecycle_audit`**: Stores training and promotion pipeline lifecycle events (pipeline run ID, timestamp, pipeline execution status, and high-level execution payload) written by `record_lifecycle_run()`.
+- **`promotion_audit`**: Stores detailed model promotion gate evaluations, candidate/champion benchmark metrics, benchmark SHA-256 digests, and gate outcomes (both approved promotions and rejected attempts) written by `record_promotion_audit()` and queried by `GET /audit/promotions`.
+
+Although they share a common default path for convenience in local single-node development, they are **independently configurable** via environment variables:
+
+```bash
+# Example: separating audit databases
+export MODELFORGE_LIFECYCLE_AUDIT_DB_PATH="data/lifecycle_audit.db"
+export MODELFORGE_PROMOTION_AUDIT_DB_PATH="data/promotion_audit.db"
+```
+
+#### Consequences of configuring different paths
+
+Configuring distinct paths for `lifecycle_audit_db_path` and `promotion_audit_db_path` has the following operational implications:
+
+1. **Physical table and storage isolation**:
+   - The `lifecycle_audit` table is created and maintained exclusively in the database designated by `lifecycle_audit_db_path`.
+   - The `promotion_audit` table is created and maintained exclusively in the database designated by `promotion_audit_db_path`.
+   - Neither database contains tables or records from the other subsystem.
+
+2. **Lock contention reduction**:
+   - SQLite uses file-level locking for write operations. Separating the databases eliminates write-lock contention between routine lifecycle execution logging and model promotion evaluation audits.
+   - Read queries executed by the Promotion Audit API (`GET /audit/promotions`) will not acquire shared read locks on the lifecycle audit database, allowing pipeline execution logs to be appended without read contention.
+
+3. **API read query isolation**:
+   - The read-only Promotion Audit API endpoint (`GET /audit/promotions`) queries only `settings.promotion_audit_db_path`.
+   - Directing the endpoint to a dedicated promotion audit database completely isolates API client query traffic from background training lifecycle logging.
+
+4. **Independent backup, retention, and access governance**:
+   - Model promotion audit records document model governance, quality gating, and compliance decisions; these often carry different audit retention requirements from operational pipeline lifecycle logs.
+   - Independent paths allow distinct backup schedules, snapshot frequencies, retention policies, and file-level permissions (e.g., granting read access to promotion audit logs without exposing pipeline lifecycle logs).
+
+5. **Container volume mounting and filesystem permissions**:
+   - Both paths must reside on storage accessible to the FastAPI process. In the containerized stack, `./data/` is bind-mounted into the `api` container and owned by UID/GID `1000:1000`.
+   - If either path is pointed outside `./data/` (for example, to a separate log volume), the directory **must** be explicitly added to `docker-compose.yml` volume mounts and configured with write permissions for UID 1000. Configuring a path outside mounted volumes will result in write errors or data loss upon container recreation.
+
+6. **File initialization and empty-state handling**:
+   - SQLite files and schema tables are created lazily on the first write if the parent directory exists.
+   - If `promotion_audit_db_path` is configured to a non-existent or newly created file, `GET /audit/promotions` gracefully handles the uninitialized state and returns an empty list (`[]`, HTTP 200) until the first promotion evaluation executes.
+
 ---
 
 ## 4. Persistent Volumes
@@ -229,8 +274,9 @@ run metadata, parameters, metrics, and registry entries.
 
 SQLite is appropriate for local development and single-node deployments. It is
 not suited to concurrent multi-process writes. For multi-user or high-throughput
-deployments a PostgreSQL backend is recommended, but this is not currently
-configured.
+deployments, a PostgreSQL backend can be evaluated if empirical workload evidence
+demonstrates concurrency bottlenecks (see Roadmap Milestone 11), but this is not
+currently configured.
 
 ### Artifact store
 
@@ -394,16 +440,15 @@ permission errors will occur.
 
 | Limitation | Impact | Workaround / Path forward |
 |---|---|---|
-| **SQLite backend** | Not suitable for concurrent MLflow writes or multi-node deployments | Migrate to PostgreSQL backend |
+| **SQLite backend** | Not suitable for concurrent MLflow writes or multi-node deployments | Evaluate concurrency under load; migrate to PostgreSQL only if justified by empirical evidence (Milestone 11) |
 | **Single-node stack** | No horizontal scaling, no load balancing | Use Kubernetes + multi-replica deployment |
 | **No TLS** | Data in transit is unencrypted | Add a TLS-terminating reverse proxy |
-| **No API authentication** | All endpoints are open | Add authentication middleware |
+| **No API authentication** | All endpoints are open | Add authentication middleware (Milestone 10) |
 | **Loopback-only binding** | Services not reachable remotely | Intentional for local dev; requires proxy for remote access |
 | **`modelforge-api:dev` image** | Must be built locally; not published to a registry | Publish to a container registry (e.g. GHCR) and update Compose |
-| **`StarletteDeprecationWarning` in tests** | Test suite emits one warning | Upgrade to `httpx2` (Milestone 5) |
 | **No secrets management** | Credentials are in `.env` on disk | Integrate Docker Secrets or a vault |
 | **Prometheus metrics are in-process** | Metrics reset on each API restart | Accept limitation for current scale |
-| **No retraining trigger** | Model is not automatically retrained when drift is detected | Drift endpoint reports drift; retraining must be triggered manually |
+| **No retraining trigger** | Model is not automatically retrained when drift is detected | Drift endpoint reports drift; retraining must be triggered manually (see Milestone 9) |
 
 ---
 
