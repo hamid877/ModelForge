@@ -1,4 +1,6 @@
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import mlflow
 import mlflow.sklearn
@@ -92,6 +94,10 @@ def run_training_and_promote(
     *,
     benchmark_df: pd.DataFrame | None = None,
     benchmark_version: str | None = None,
+    candidate_callback: Callable[[str, str | None], None] | None = None,
+    job_id: str | None = None,
+    audit_db_path: str | Path | None = None,
+    **kwargs: Any,
 ) -> tuple[dict[str, float], PromotionDecision]:
     """Train, register, and evaluate candidate promotion on shared benchmark."""
     config = config or TrainingConfig()
@@ -148,6 +154,12 @@ def run_training_and_promote(
                 "promotion was not attempted."
             )
 
+        candidate_run_id = getattr(getattr(run, "info", None), "run_id", None)
+
+        cb = candidate_callback or kwargs.get("pre_promotion_callback")
+        if cb is not None:
+            cb(str(candidate_version), candidate_run_id)
+
         # Resolve shared benchmark dataset if not explicitly supplied
         resolved_benchmark_df = benchmark_df
         resolved_benchmark_version = benchmark_version or settings.benchmark_version
@@ -165,7 +177,6 @@ def run_training_and_promote(
             except Exception:
                 resolved_benchmark_df = None
 
-        candidate_run_id = getattr(getattr(run, "info", None), "run_id", None)
         decision = promote_model(
             candidate_version=candidate_version,
             candidate_f1=metrics["f1_score"],
@@ -176,6 +187,8 @@ def run_training_and_promote(
             model_name=settings.model_name,
             alias=settings.model_alias,
             candidate_run_id=candidate_run_id,
+            audit_db_path=audit_db_path,
+            job_id=job_id,
         )
 
     return metrics, decision

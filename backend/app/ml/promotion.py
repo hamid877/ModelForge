@@ -46,6 +46,7 @@ class PromotionDecision:
     candidate_run_id: str | None = None
     timestamp: str | None = None
     audit_id: str | None = None
+    job_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -289,6 +290,7 @@ def _persist_audit_and_finalize(
     audit_db_path: str | Path | None,
     candidate_training_df: pd.DataFrame | None,
     client: MlflowClient | None = None,
+    job_id: str | None = None,
 ) -> PromotionDecision:
     """Safely record audit and set alias only if approved and audit succeeds.
 
@@ -340,6 +342,8 @@ def _persist_audit_and_finalize(
         "champion_metrics": decision.champion_metrics,
         "dataset_provenance": provenance_dict,
     }
+    if job_id is not None:
+        audit_payload["job_id"] = str(job_id)
 
     if decision.approved:
         # 1. Audit SQLite recording must succeed BEFORE alias update
@@ -365,6 +369,7 @@ def _persist_audit_and_finalize(
                 candidate_run_id=candidate_run_id,
                 timestamp=timestamp,
                 audit_id=audit_id,
+                job_id=job_id,
             )
 
         # 2. MLflow traceability logging if active run exists
@@ -403,6 +408,7 @@ def _persist_audit_and_finalize(
                 candidate_run_id=candidate_run_id,
                 timestamp=timestamp,
                 audit_id=audit_id,
+                job_id=job_id,
             )
 
         # 3. Both succeed: safe to update champion alias
@@ -510,6 +516,7 @@ def _persist_audit_and_finalize(
                             candidate_run_id=candidate_run_id,
                             timestamp=timestamp,
                             audit_id=audit_id,
+                            job_id=job_id,
                         )
 
                     return PromotionDecision(
@@ -528,6 +535,7 @@ def _persist_audit_and_finalize(
                         candidate_run_id=candidate_run_id,
                         timestamp=timestamp,
                         audit_id=audit_id,
+                        job_id=job_id,
                     )
 
                 failure_reason = (
@@ -580,6 +588,7 @@ def _persist_audit_and_finalize(
                     candidate_run_id=candidate_run_id,
                     timestamp=timestamp,
                     audit_id=audit_id,
+                    job_id=job_id,
                 )
 
         return PromotionDecision(
@@ -598,6 +607,7 @@ def _persist_audit_and_finalize(
             candidate_run_id=candidate_run_id,
             timestamp=timestamp,
             audit_id=audit_id,
+            job_id=job_id,
         )
 
     # For rejected decisions: persist audit and return decision
@@ -631,6 +641,7 @@ def _persist_audit_and_finalize(
         candidate_run_id=candidate_run_id,
         timestamp=timestamp,
         audit_id=audit_id,
+        job_id=job_id,
     )
 
 
@@ -653,6 +664,7 @@ def promote_model(
     champion_benchmark_version: str | None = None,
     candidate_run_id: str | None = None,
     audit_db_path: str | Path | None = None,
+    job_id: str | None = None,
 ) -> PromotionDecision:
     """Promote a registered model version only if every promotion gate passes.
 
@@ -700,6 +712,7 @@ def promote_model(
                 benchmark_version=resolved_benchmark_version,
                 margin=min_improvement,
                 gate_outcomes=gate_outcomes,
+                job_id=job_id,
             )
             return _persist_audit_and_finalize(
                 dec,
@@ -710,6 +723,7 @@ def promote_model(
                 champion_version=None,
                 audit_db_path=audit_db_path,
                 candidate_training_df=candidate_training_df,
+                job_id=job_id,
             )
         except ValueError as exc:
             msg = str(exc).lower()
@@ -730,6 +744,7 @@ def promote_model(
                 benchmark_version=resolved_benchmark_version,
                 margin=min_improvement,
                 gate_outcomes=gate_outcomes,
+                job_id=job_id,
             )
             return _persist_audit_and_finalize(
                 dec,
@@ -740,6 +755,7 @@ def promote_model(
                 champion_version=None,
                 audit_db_path=audit_db_path,
                 candidate_training_df=candidate_training_df,
+                job_id=job_id,
             )
     else:
         actual_benchmark_digest = compute_dataframe_sha256(resolved_benchmark_df)
@@ -772,6 +788,7 @@ def promote_model(
                 margin=min_improvement,
                 benchmark_digest=actual_benchmark_digest,
                 gate_outcomes=gate_outcomes,
+                job_id=job_id,
             )
             return _persist_audit_and_finalize(
                 dec,
@@ -782,6 +799,7 @@ def promote_model(
                 champion_version=None,
                 audit_db_path=audit_db_path,
                 candidate_training_df=candidate_training_df,
+                job_id=job_id,
             )
         except TypeError:
             gate_outcomes["benchmark_integrity"] = {
@@ -797,6 +815,7 @@ def promote_model(
                 margin=min_improvement,
                 benchmark_digest=actual_benchmark_digest,
                 gate_outcomes=gate_outcomes,
+                job_id=job_id,
             )
             return _persist_audit_and_finalize(
                 dec,
@@ -807,6 +826,7 @@ def promote_model(
                 champion_version=None,
                 audit_db_path=audit_db_path,
                 candidate_training_df=candidate_training_df,
+                job_id=job_id,
             )
 
     gate_outcomes["benchmark_integrity"] = {
@@ -831,6 +851,7 @@ def promote_model(
             margin=min_improvement,
             benchmark_digest=actual_benchmark_digest,
             gate_outcomes=gate_outcomes,
+            job_id=job_id,
         )
         return _persist_audit_and_finalize(
             dec,
@@ -841,6 +862,7 @@ def promote_model(
             champion_version=None,
             audit_db_path=audit_db_path,
             candidate_training_df=candidate_training_df,
+            job_id=job_id,
         )
 
     if check_training_benchmark_overlap(candidate_training_df, resolved_benchmark_df):
@@ -857,6 +879,7 @@ def promote_model(
             margin=min_improvement,
             benchmark_digest=actual_benchmark_digest,
             gate_outcomes=gate_outcomes,
+            job_id=job_id,
         )
         return _persist_audit_and_finalize(
             dec,
@@ -867,6 +890,7 @@ def promote_model(
             champion_version=None,
             audit_db_path=audit_db_path,
             candidate_training_df=candidate_training_df,
+            job_id=job_id,
         )
 
     gate_outcomes["separation_and_overlap"] = {"passed": True}
@@ -886,6 +910,7 @@ def promote_model(
             margin=min_improvement,
             benchmark_digest=actual_benchmark_digest,
             gate_outcomes=gate_outcomes,
+            job_id=job_id,
         )
         return _persist_audit_and_finalize(
             dec,
@@ -896,6 +921,7 @@ def promote_model(
             champion_version=None,
             audit_db_path=audit_db_path,
             candidate_training_df=candidate_training_df,
+            job_id=job_id,
         )
 
     cand_eval = evaluate_model_on_benchmark(candidate_model, resolved_benchmark_df)
@@ -953,6 +979,7 @@ def promote_model(
                     benchmark_digest=actual_benchmark_digest,
                     candidate_metrics=cand_eval,
                     gate_outcomes=gate_outcomes,
+                    job_id=job_id,
                 )
                 return _persist_audit_and_finalize(
                     dec,
@@ -964,6 +991,7 @@ def promote_model(
                     audit_db_path=audit_db_path,
                     candidate_training_df=candidate_training_df,
                     client=client,
+                    job_id=job_id,
                 )
 
         gate_outcomes["champion_evaluation"] = {
@@ -1008,6 +1036,7 @@ def promote_model(
         candidate_version=candidate_version,
         champion_version=champion_version,
         candidate_run_id=candidate_run_id,
+        job_id=job_id,
     )
 
     return _persist_audit_and_finalize(
@@ -1020,4 +1049,5 @@ def promote_model(
         audit_db_path=audit_db_path,
         candidate_training_df=candidate_training_df,
         client=client,
+        job_id=job_id,
     )

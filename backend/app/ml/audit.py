@@ -31,6 +31,7 @@ __all__ = [
     "db_connection",
     "finalize_operator_resolution_atomic",
     "get_db_connection",
+    "get_promotion_audit_by_job_id",
     "get_promotion_audit_records",
     "migrate_audit_database_idempotent",
     "record_lifecycle_run",
@@ -308,3 +309,73 @@ def get_promotion_audit_records(
         raise AuditDatabaseError("Failed to parse promotion audit payload.") from exc
 
     return results
+
+
+def get_promotion_audit_by_job_id(
+    job_id: str,
+    database_path: str | Path | None = None,
+) -> dict[str, Any] | None:
+    """Retrieve the latest promotion audit record associated with an exact job_id."""
+    db_path = Path(
+        database_path if database_path is not None else settings.promotion_audit_db_path
+    )
+    if not db_path.exists():
+        return None
+
+    try:
+        with db_connection(db_path, row_factory=sqlite3.Row) as connection:
+            cursor = connection.execute("PRAGMA table_info(promotion_audit);")
+            columns = {row[1] for row in cursor.fetchall()}
+            if not columns:
+                return None
+
+            if "job_id" in columns:
+                cursor = connection.execute(
+                    """
+                    SELECT audit_id, timestamp, model_name, candidate_version,
+                           candidate_run_id, champion_version, approved, reason,
+                           candidate_f1, champion_f1, benchmark_version,
+                           benchmark_digest, margin, job_id, payload
+                    FROM promotion_audit
+                    WHERE job_id = ?
+                    ORDER BY timestamp DESC
+                    """,
+                    (str(job_id),),
+                )
+                matching_rows = [dict(r) for r in cursor.fetchall()]
+            else:
+                cursor = connection.execute(
+                    """
+                    SELECT audit_id, timestamp, model_name, candidate_version,
+                           candidate_run_id, champion_version, approved, reason,
+                           candidate_f1, champion_f1, benchmark_version,
+                           benchmark_digest, margin, payload
+                    FROM promotion_audit
+                    ORDER BY timestamp DESC
+                    """
+                )
+                matching_rows = []
+                for r in cursor.fetchall():
+                    r_dict = dict(r)
+                    payload_data = json.loads(r_dict["payload"])
+                    if payload_data.get("job_id") == str(job_id):
+                        r_dict["job_id"] = str(job_id)
+                        matching_rows.append(r_dict)
+
+            if len(matching_rows) == 0:
+                return None
+
+            if len(matching_rows) > 1:
+                raise AuditDatabaseError(
+                    f"Duplicate promotion audit records found for job_id '{job_id}' "
+                    f"(count={len(matching_rows)}). Exactly one record required."
+                )
+
+            item = matching_rows[0]
+            item["approved"] = bool(item["approved"])
+            if isinstance(item["payload"], str):
+                item["payload"] = json.loads(item["payload"])
+            return item
+    except (sqlite3.DatabaseError, OSError, json.JSONDecodeError) as exc:
+        logger.exception("get_promotion_audit_by_job_id_failed job_id=%s", job_id)
+        raise AuditDatabaseError("Failed to query promotion audit database.") from exc
