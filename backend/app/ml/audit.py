@@ -31,6 +31,7 @@ __all__ = [
     "db_connection",
     "finalize_operator_resolution_atomic",
     "get_db_connection",
+    "get_operator_resolution_audit",
     "get_promotion_audit_by_job_id",
     "get_promotion_audit_records",
     "migrate_audit_database_idempotent",
@@ -379,3 +380,53 @@ def get_promotion_audit_by_job_id(
     except (sqlite3.DatabaseError, OSError, json.JSONDecodeError) as exc:
         logger.exception("get_promotion_audit_by_job_id_failed job_id=%s", job_id)
         raise AuditDatabaseError("Failed to query promotion audit database.") from exc
+
+
+def get_operator_resolution_audit(
+    job_id: str,
+    database_path: str | Path | None = None,
+) -> dict[str, Any] | None:
+    """Retrieve operator resolution audit record for a specific job_id."""
+    db_path = Path(
+        database_path if database_path is not None else settings.lifecycle_audit_db_path
+    )
+    if not db_path.exists():
+        return None
+
+    try:
+        with db_connection(db_path, row_factory=sqlite3.Row) as connection:
+            cursor = connection.execute(
+                "SELECT 1 FROM sqlite_master "
+                "WHERE type='table' AND name='operator_resolution_audit';"
+            )
+            if cursor.fetchone() is None:
+                return None
+
+            cursor = connection.execute(
+                """
+                SELECT resolution_id, job_id, timestamp, operator, previous_state,
+                       selected_resolution, candidate_version,
+                       observed_champion_version, target_champion_version,
+                       rollback_performed, resolution_reason, evidence_payload
+                FROM operator_resolution_audit
+                WHERE job_id = ?
+                ORDER BY timestamp DESC
+                LIMIT 1;
+                """,
+                (str(job_id),),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                return None
+            item = dict(row)
+            if isinstance(item.get("evidence_payload"), str):
+                try:
+                    item["evidence_payload"] = json.loads(item["evidence_payload"])
+                except Exception:
+                    pass
+            return item
+    except (sqlite3.DatabaseError, OSError) as exc:
+        logger.exception("get_operator_resolution_audit_failed job_id=%s", job_id)
+        raise AuditDatabaseError(
+            "Failed to query operator resolution audit database."
+        ) from exc

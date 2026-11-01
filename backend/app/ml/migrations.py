@@ -390,7 +390,7 @@ def validate_operator_resolution_inputs(
             f"Must be exactly one of: {sorted(VALID_RESOLUTIONS)}."
         )
 
-    if rollback_performed not in (0, 1) or isinstance(rollback_performed, bool):
+    if type(rollback_performed) is not int or rollback_performed not in (0, 1):
         raise ValueError(
             f"Invalid rollback_performed value '{rollback_performed}'. "
             "Must be integer 0 or 1."
