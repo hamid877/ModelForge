@@ -713,12 +713,27 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Execute a single polling iteration and exit",
     )
+    parser.add_argument(
+        "--handler",
+        choices=["noop", "production"],
+        default="noop",
+        help="Job handler to use ('noop' or 'production')",
+    )
     args = parser.parse_args(argv)
+
+    handler: JobHandler
+    if args.handler == "production":
+        from backend.app.ml.training_handler import ControlledTrainingJobHandler
+
+        handler = ControlledTrainingJobHandler(database_path=args.db_path)
+    else:
+        handler = NoOpJobHandler()
 
     worker = RetrainingWorker(
         database_path=args.db_path,
         lock_path=args.lock_path,
         worker_id=args.worker_id,
+        handler=handler,
         poll_interval_seconds=args.poll_interval,
         heartbeat_interval_seconds=args.heartbeat_interval,
         lease_duration_seconds=args.lease_duration,

@@ -395,6 +395,97 @@ def validate_job_ownership(
     return job
 
 
+def persist_candidate_identity(
+    database_path: str | Path | None = None,
+    *,
+    job_id: str,
+    worker_id: str,
+    lease_token: str,
+    candidate_version: str,
+    candidate_run_id: str | None = None,
+    previous_champion_version: str | None = None,
+) -> dict[str, Any]:
+    """Persist candidate and previous champion identities for an actively owned job.
+
+    Fenced by job_id, worker_id, lease_token, status='running', and is_active=1.
+    Strictly requires exactly one affected row.
+
+    Args:
+        database_path: Optional path to SQLite database.
+        job_id: ID of the running job.
+        worker_id: Active worker identifier.
+        lease_token: Active lease token.
+        candidate_version: Registered candidate model version string.
+        candidate_run_id: Optional MLflow run ID string.
+        previous_champion_version: Optional observed champion version string.
+
+    Returns:
+        Updated job record as dictionary.
+
+    Raises:
+        JobNotFoundError: If job does not exist.
+        JobOwnershipError: If worker/token mismatch or job not in running state.
+    """
+    if not job_id:
+        raise ValueError("job_id must be provided.")
+    if not worker_id:
+        raise ValueError("worker_id must be provided.")
+    if not lease_token:
+        raise ValueError("lease_token must be provided.")
+    if not candidate_version:
+        raise ValueError("candidate_version must be provided.")
+
+    with db_connection(database_path, isolation_level=None) as conn:
+        with immediate_transaction(conn):
+            cursor = conn.execute(
+                """
+                UPDATE retraining_jobs
+                SET candidate_version = ?,
+                    candidate_run_id = ?,
+                    previous_champion_version = ?
+                WHERE job_id = ?
+                  AND worker_id = ?
+                  AND lease_token = ?
+                  AND status = 'running'
+                  AND is_active = 1;
+                """,
+                (
+                    str(candidate_version),
+                    str(candidate_run_id) if candidate_run_id is not None else None,
+                    (
+                        str(previous_champion_version)
+                        if previous_champion_version is not None
+                        else None
+                    ),
+                    job_id,
+                    worker_id,
+                    lease_token,
+                ),
+            )
+
+            if cursor.rowcount != 1:
+                chk = conn.execute(
+                    "SELECT status, is_active, worker_id, lease_token "
+                    "FROM retraining_jobs WHERE job_id = ?;",
+                    (job_id,),
+                ).fetchone()
+                if chk is None:
+                    raise JobNotFoundError(f"Job '{job_id}' does not exist.")
+                raise JobOwnershipError(
+                    f"Failed to persist candidate identity: Worker '{worker_id}' "
+                    f"with token '{lease_token}' is not active owner of running job "
+                    f"'{job_id}' (current status='{chk[0]}', active={chk[1]})."
+                )
+
+            cursor = conn.execute(
+                "SELECT * FROM retraining_jobs WHERE job_id = ?;", (job_id,)
+            )
+            row = cursor.fetchone()
+            if row is None:
+                raise JobNotFoundError(f"Job '{job_id}' not found.")
+            return _row_to_dict(cursor, row)
+
+
 def mark_promotion_started(
     database_path: str | Path | None = None,
     *,
