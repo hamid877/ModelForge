@@ -7,6 +7,7 @@ import sys
 import threading
 import time
 from datetime import UTC, datetime, timedelta
+from unittest.mock import patch
 
 import pytest
 
@@ -64,7 +65,8 @@ def test_worker_initialization_and_validation(tmp_path):
 def test_worker_startup_and_exclusive_lock_acquisition(tmp_path):
     """Worker acquires and retains exclusive lock descriptor throughout its lifetime."""
     lock_file = tmp_path / "exclusive_worker.lock"
-    worker = RetrainingWorker(lock_path=lock_file)
+    db_file = tmp_path / "exclusive_worker.db"
+    worker = RetrainingWorker(database_path=db_file, lock_path=lock_file)
 
     assert not worker.is_locked
     fd = worker.acquire_lock()
@@ -87,8 +89,13 @@ def test_worker_startup_and_exclusive_lock_acquisition(tmp_path):
 def test_worker_refusing_startup_when_lock_held(tmp_path):
     """Worker refuses startup if another worker or process holds the exclusive lock."""
     lock_file = tmp_path / "conflict_worker.lock"
-    worker1 = RetrainingWorker(lock_path=lock_file, worker_id="worker-primary")
-    worker2 = RetrainingWorker(lock_path=lock_file, worker_id="worker-secondary")
+    db_file = tmp_path / "conflict_worker.db"
+    worker1 = RetrainingWorker(
+        database_path=db_file, lock_path=lock_file, worker_id="worker-primary"
+    )
+    worker2 = RetrainingWorker(
+        database_path=db_file, lock_path=lock_file, worker_id="worker-secondary"
+    )
 
     worker1.acquire_lock()
     try:
@@ -393,7 +400,9 @@ def test_handler_deliberately_ignoring_cancellation_preserves_lock(
     assert worker.is_locked
 
     # Another worker CANNOT acquire the lock because it is retained
-    worker2 = RetrainingWorker(lock_path=lock_file, worker_id="w-intruder")
+    worker2 = RetrainingWorker(
+        database_path=migrated_db, lock_path=lock_file, worker_id="w-intruder"
+    )
     with pytest.raises(WorkerLockConflictError):
         worker2.acquire_lock()
 
@@ -664,13 +673,14 @@ def test_lock_release_after_process_termination(tmp_path):
     """Terminating worker process releases flock so another worker can start."""
     lock_file = tmp_path / "proc_term.lock"
     ready_file = tmp_path / "worker_ready.txt"
+    db_file = tmp_path / "proc_term.db"
 
     code = f"""
 import sys, time
 from pathlib import Path
 from backend.app.ml.worker import RetrainingWorker
 
-worker = RetrainingWorker(lock_path=r'{lock_file}')
+worker = RetrainingWorker(database_path=r'{db_file}', lock_path=r'{lock_file}')
 worker.acquire_lock()
 Path(r'{ready_file}').write_text("ready")
 while True:
@@ -684,7 +694,7 @@ while True:
         assert ready_file.exists()
 
         # Another worker in this process cannot acquire lock
-        worker2 = RetrainingWorker(lock_path=lock_file)
+        worker2 = RetrainingWorker(database_path=db_file, lock_path=lock_file)
         with pytest.raises(WorkerLockConflictError):
             worker2.acquire_lock()
 
@@ -793,13 +803,18 @@ def test_subprocess_sigterm_graceful_shutdown(tmp_path):
     """Subprocess running RetrainingWorker handles SIGTERM gracefully and exits 0."""
     lock_file = tmp_path / "sigterm.lock"
     ready_file = tmp_path / "ready.txt"
+    db_file = tmp_path / "sigterm.db"
 
     code = f"""
 import sys, time
 from pathlib import Path
 from backend.app.ml.worker import RetrainingWorker
 
-worker = RetrainingWorker(lock_path=r'{lock_file}', poll_interval_seconds=1.0)
+worker = RetrainingWorker(
+    database_path=r'{db_file}',
+    lock_path=r'{lock_file}',
+    poll_interval_seconds=1.0,
+)
 Path(r'{ready_file}').write_text("ready")
 worker.run()
 """
@@ -819,10 +834,105 @@ worker.run()
         assert exit_code == 0
 
         # Lock was released
-        w = RetrainingWorker(lock_path=lock_file)
+        w = RetrainingWorker(database_path=db_file, lock_path=lock_file)
         w.acquire_lock()
         assert w.is_locked
         w.release_lock()
     finally:
         if proc.poll() is None:
             proc.kill()
+
+
+def test_worker_migrates_only_after_acquiring_exclusive_lock(tmp_path):
+    """Worker invokes schema migration only after successfully acquiring WorkerLock."""
+    db_path = tmp_path / "unmigrated.db"
+    lock_file = tmp_path / "worker.lock"
+    worker = RetrainingWorker(database_path=db_path, lock_path=lock_file)
+
+    migration_lock_state = None
+
+    def spy_migrate(path):
+        nonlocal migration_lock_state
+        migration_lock_state = worker.is_locked
+        migrate_audit_database_idempotent(path)
+
+    with patch(
+        "backend.app.ml.worker.migrate_audit_database_idempotent",
+        side_effect=spy_migrate,
+    ):
+        with worker:
+            pass
+
+    assert migration_lock_state is True
+    assert worker.is_locked is False
+
+
+def test_worker_lock_failure_does_not_migrate(tmp_path):
+    """A worker that fails to acquire the exclusive lock never invokes migration."""
+    db_path = tmp_path / "unmigrated.db"
+    lock_file = tmp_path / "conflict.lock"
+    worker1 = RetrainingWorker(
+        database_path=db_path, lock_path=lock_file, worker_id="w1"
+    )
+    worker2 = RetrainingWorker(
+        database_path=db_path, lock_path=lock_file, worker_id="w2"
+    )
+
+    worker1.acquire_lock()
+    try:
+        migrate_called = False
+
+        def spy_migrate(path):
+            nonlocal migrate_called
+            migrate_called = True
+
+        with patch(
+            "backend.app.ml.worker.migrate_audit_database_idempotent",
+            side_effect=spy_migrate,
+        ):
+            with pytest.raises(WorkerLockConflictError):
+                with worker2:
+                    pass
+
+        assert not migrate_called
+    finally:
+        worker1.release_lock()
+
+
+def test_worker_single_iteration_mode_initializes_schema_safely(tmp_path):
+    """Worker single iteration execution initializes schema before polling."""
+    db_path = tmp_path / "once_fresh.db"
+    lock_file = tmp_path / "once.lock"
+    assert not db_path.exists()
+
+    worker = RetrainingWorker(database_path=db_path, lock_path=lock_file)
+    with worker:
+        res = worker.run_once()
+
+    assert res is None
+    assert db_path.exists()
+
+    with sqlite3.connect(str(db_path)) as conn:
+        cursor = conn.execute("SELECT name FROM sqlite_master WHERE type='table';")
+        tables = {row[0] for row in cursor.fetchall()}
+        assert "retraining_jobs" in tables
+        assert "drift_alerts" in tables
+        assert "promotion_audit" in tables
+
+
+def test_worker_main_once_flag_initializes_schema(tmp_path):
+    """Worker main() with --once flag safely migrates fresh DB and exits 0."""
+    db_path = tmp_path / "cli_once.db"
+    lock_file = tmp_path / "cli_once.lock"
+    assert not db_path.exists()
+
+    exit_code = main(
+        ["--db-path", str(db_path), "--lock-path", str(lock_file), "--once"]
+    )
+    assert exit_code == 0
+    assert db_path.exists()
+
+    with sqlite3.connect(str(db_path)) as conn:
+        cursor = conn.execute("SELECT name FROM sqlite_master WHERE type='table';")
+        tables = {row[0] for row in cursor.fetchall()}
+        assert "retraining_jobs" in tables

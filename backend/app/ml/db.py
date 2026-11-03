@@ -15,6 +15,31 @@ from backend.app.config import settings
 
 logger = logging.getLogger(__name__)
 
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent
+
+__all__ = [
+    "PROJECT_ROOT",
+    "db_connection",
+    "get_db_connection",
+    "immediate_transaction",
+    "resolve_shared_database_path",
+]
+
+
+def resolve_shared_database_path(database_path: str | Path | None = None) -> Path:
+    """Resolve shared database path anchored to project directory or provided path."""
+    if database_path is not None:
+        configured = Path(database_path)
+    else:
+        configured = Path(
+            getattr(settings, "lifecycle_audit_db_path", "data/lifecycle_audit.db")
+        )
+
+    if configured.is_absolute():
+        return configured.resolve()
+
+    return (PROJECT_ROOT / configured).resolve()
+
 
 def get_db_connection(
     database_path: str | Path | None = None,
@@ -34,9 +59,7 @@ def get_db_connection(
     Returns:
         Configured sqlite3.Connection with foreign_keys and busy_timeout set.
     """
-    path = Path(
-        database_path if database_path is not None else settings.lifecycle_audit_db_path
-    )
+    path = resolve_shared_database_path(database_path)
     path.parent.mkdir(parents=True, exist_ok=True)
 
     timeout = (

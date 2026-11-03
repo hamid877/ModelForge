@@ -66,6 +66,10 @@ class Settings(BaseSettings):
         default=5.0,
         gt=0.0,
     )
+    retraining_cooldown_seconds: int = Field(
+        default=3600,
+        ge=0,
+    )
 
     # Promotion quality gate and shared benchmark settings
     # Note: Requiring an F1 improvement margin prevents accidental promotions
