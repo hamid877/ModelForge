@@ -18,6 +18,7 @@ from backend.app.ml.audit import (
     record_promotion_audit,
     validate_operator_resolution_inputs,
 )
+from backend.app.ml.db import PROJECT_ROOT, resolve_shared_database_path
 
 
 def _get_table_names(conn: sqlite3.Connection) -> set[str]:
@@ -967,3 +968,26 @@ def test_atomic_operator_resolution_rowcount_mismatch_single_rollback(
             "SELECT status FROM retraining_jobs WHERE job_id = 'job-active-run';"
         ).fetchone()[0]
         assert status == "running"
+
+
+def test_resolve_shared_database_path_relative_and_absolute(tmp_path, monkeypatch):
+    """Verify relative paths anchor to PROJECT_ROOT across directories."""
+    # 1. Configured default when None passed
+    resolved_default = resolve_shared_database_path(None)
+    assert resolved_default == (PROJECT_ROOT / "data/lifecycle_audit.db").resolve()
+
+    # 2. Relative path resolves against PROJECT_ROOT from current working directory
+    rel_path = "data/custom_audit.db"
+    resolved_rel = resolve_shared_database_path(rel_path)
+    assert resolved_rel == (PROJECT_ROOT / rel_path).resolve()
+
+    # 3. Changing working directory does not change resolution of relative path
+    monkeypatch.chdir(tmp_path)
+    resolved_from_tmp = resolve_shared_database_path(rel_path)
+    assert resolved_from_tmp == (PROJECT_ROOT / rel_path).resolve()
+    assert resolved_from_tmp != (tmp_path / rel_path).resolve()
+
+    # 4. Absolute paths remain valid and unchanged
+    abs_path = (tmp_path / "somewhere_else" / "test.db").resolve()
+    resolved_abs = resolve_shared_database_path(abs_path)
+    assert resolved_abs == abs_path
