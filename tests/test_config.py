@@ -102,6 +102,7 @@ def test_retraining_orchestration_settings(monkeypatch):
         "MODELFORGE_RETRAINING_HEARTBEAT_INTERVAL_SECONDS",
         "MODELFORGE_RETRAINING_MAX_ATTEMPTS",
         "MODELFORGE_RETRAINING_POLL_INTERVAL_SECONDS",
+        "MODELFORGE_RETRAINING_COOLDOWN_SECONDS",
     ]
     for var in env_vars:
         monkeypatch.delenv(var, raising=False)
@@ -113,6 +114,7 @@ def test_retraining_orchestration_settings(monkeypatch):
     assert config.retraining_heartbeat_interval_seconds == 15
     assert config.retraining_max_attempts == 3
     assert config.retraining_poll_interval_seconds == 5.0
+    assert config.retraining_cooldown_seconds == 3600
 
     monkeypatch.setenv("MODELFORGE_SQLITE_BUSY_TIMEOUT_MS", "10000")
     monkeypatch.setenv("MODELFORGE_WORKER_LOCK_PATH", "data/custom_worker.lock")
@@ -120,6 +122,7 @@ def test_retraining_orchestration_settings(monkeypatch):
     monkeypatch.setenv("MODELFORGE_RETRAINING_HEARTBEAT_INTERVAL_SECONDS", "30")
     monkeypatch.setenv("MODELFORGE_RETRAINING_MAX_ATTEMPTS", "5")
     monkeypatch.setenv("MODELFORGE_RETRAINING_POLL_INTERVAL_SECONDS", "2.5")
+    monkeypatch.setenv("MODELFORGE_RETRAINING_COOLDOWN_SECONDS", "1800")
 
     custom = Settings(_env_file=None)
     assert custom.sqlite_busy_timeout_ms == 10000
@@ -128,3 +131,15 @@ def test_retraining_orchestration_settings(monkeypatch):
     assert custom.retraining_heartbeat_interval_seconds == 30
     assert custom.retraining_max_attempts == 5
     assert custom.retraining_poll_interval_seconds == 2.5
+    assert custom.retraining_cooldown_seconds == 1800
+
+
+def test_retraining_cooldown_validation(monkeypatch):
+    """Verify retraining cooldown accepts zero and rejects negative values."""
+    monkeypatch.setenv("MODELFORGE_RETRAINING_COOLDOWN_SECONDS", "0")
+    config_zero = Settings(_env_file=None)
+    assert config_zero.retraining_cooldown_seconds == 0
+
+    monkeypatch.setenv("MODELFORGE_RETRAINING_COOLDOWN_SECONDS", "-1")
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None)

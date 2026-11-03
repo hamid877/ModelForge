@@ -17,6 +17,11 @@ def mock_mlflow_setup(monkeypatch):
     monkeypatch.setattr(api_module, "setup_mlflow", lambda: None)
 
 
+@pytest.fixture(autouse=True)
+def mock_migration_setup(monkeypatch):
+    monkeypatch.setattr(api_module, "migrate_audit_database_idempotent", lambda _: None)
+
+
 @patch("backend.app.api.api.load_registered_model_by_alias")
 def test_health_endpoint(mock_load_model):
     mock_load_model.return_value.predict.return_value = [0]
@@ -1051,3 +1056,51 @@ def test_audit_promotions_corrupted_database_returns_503(
     assert str(corrupt_db) not in response.json()["detail"]
     assert "sqlite" not in response.json()["detail"].lower()
     assert "promotion_audit_retrieval_failed" in caplog.text
+
+
+def test_lifespan_invokes_migration_before_mlflow(monkeypatch):
+    """API lifespan runs schema migration prior to MLflow setup."""
+    execution_order = []
+
+    def fake_migrate(db_path):
+        execution_order.append(("migrate", db_path))
+
+    def fake_mlflow():
+        execution_order.append(("mlflow", None))
+
+    monkeypatch.setattr(api_module, "migrate_audit_database_idempotent", fake_migrate)
+    monkeypatch.setattr(api_module, "setup_mlflow", fake_mlflow)
+
+    with patch("backend.app.api.api.load_registered_model_by_alias"):
+        with TestClient(app):
+            pass
+
+    assert len(execution_order) >= 2
+    assert execution_order[0][0] == "migrate"
+    assert execution_order[1][0] == "mlflow"
+    assert execution_order[0][1] == api_module.settings.lifecycle_audit_db_path
+
+
+def test_lifespan_migration_failure_aborts_startup(monkeypatch):
+    """Failure during database migration aborts application startup."""
+
+    def fail_migrate(db_path):
+        raise sqlite3.OperationalError("disk I/O error during migration")
+
+    mlflow_called = False
+
+    def fake_mlflow():
+        nonlocal mlflow_called
+        mlflow_called = True
+
+    monkeypatch.setattr(api_module, "migrate_audit_database_idempotent", fail_migrate)
+    monkeypatch.setattr(api_module, "setup_mlflow", fake_mlflow)
+
+    with pytest.raises(
+        sqlite3.OperationalError, match="disk I/O error during migration"
+    ):
+        with patch("backend.app.api.api.load_registered_model_by_alias"):
+            with TestClient(app):
+                pass
+
+    assert not mlflow_called

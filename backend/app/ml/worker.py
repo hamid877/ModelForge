@@ -19,6 +19,7 @@ from typing import Any, Protocol
 from uuid import uuid4
 
 from backend.app.config import settings
+from backend.app.ml.db import resolve_shared_database_path
 from backend.app.ml.jobs import (
     JobNotFoundError,
     JobOwnershipError,
@@ -36,6 +37,7 @@ from backend.app.ml.lock import (
     WorkerLockConflictError,
     resolve_shared_lock_path,
 )
+from backend.app.ml.migrations import migrate_audit_database_idempotent
 
 logger = logging.getLogger(__name__)
 
@@ -118,11 +120,7 @@ class RetrainingWorker:
         lease_duration_seconds: int | None = None,
         shutdown_timeout: float | None = None,
     ) -> None:
-        self.database_path: Path = Path(
-            database_path
-            if database_path is not None
-            else settings.lifecycle_audit_db_path
-        )
+        self.database_path: Path = resolve_shared_database_path(database_path)
         self.lock_path: Path = resolve_shared_lock_path(lock_path)
         self.worker_id: str = worker_id or f"worker-{uuid4().hex[:12]}"
         if not self.worker_id.strip():
@@ -161,6 +159,7 @@ class RetrainingWorker:
 
         self._lock = WorkerLock(self.lock_path)
         self._shutdown_event = threading.Event()
+        self._schema_migrated = False
         self._current_context: JobExecutionContext | None = None
         self._handler_thread: threading.Thread | None = None
         self._heartbeat_thread: threading.Thread | None = None
@@ -217,8 +216,15 @@ class RetrainingWorker:
         if self._current_context is not None:
             self._current_context.cancel_event.set()
 
+    def _migrate_database_schema(self) -> None:
+        """Ensure audit database schema is initialized after lock acquisition."""
+        migrate_audit_database_idempotent(self.database_path)
+        self._schema_migrated = True
+
     def __enter__(self) -> "RetrainingWorker":
         self.acquire_lock()
+        if not self._schema_migrated:
+            self._migrate_database_schema()
         return self
 
     def __exit__(
@@ -250,15 +256,19 @@ class RetrainingWorker:
         """Execute a single polling iteration under exclusive lock protection.
 
         1. Ensures lock descriptor is held.
-        2. Scans and recovers any expired jobs (reclaims, fails, or quarantines).
-        3. Attempts to atomically claim the oldest queued job.
-        4. If claimed, executes the job with background lease heartbeats.
+        2. Ensures database schema is initialized under lock protection.
+        3. Scans and recovers any expired jobs (reclaims, fails, or quarantines).
+        4. Attempts to atomically claim the oldest queued job.
+        5. If claimed, executes the job with background lease heartbeats.
 
         Returns:
             Finalized job record if a job was claimed and completed, or None.
         """
         if not self.is_locked:
             self.acquire_lock()
+
+        if not self._schema_migrated:
+            self._migrate_database_schema()
 
         # 1. Recover expired leases adhering strictly to retry and quarantine rules
         recover_expired_jobs(self.database_path)
@@ -656,6 +666,8 @@ class RetrainingWorker:
         """Run worker polling loop with exclusive lock protection until stopped."""
         self._setup_signal_handlers()
         self.acquire_lock()
+        if not self._schema_migrated:
+            self._migrate_database_schema()
         try:
             logger.info(
                 "worker_started",

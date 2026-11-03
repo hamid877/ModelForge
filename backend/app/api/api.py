@@ -19,6 +19,7 @@ from backend.app.api.schemas import (
 from backend.app.config import settings
 from backend.app.ml.audit import AuditDatabaseError, get_promotion_audit_records
 from backend.app.ml.drift import detect_data_drift
+from backend.app.ml.migrations import migrate_audit_database_idempotent
 from backend.app.ml.registry import load_registered_model_by_alias
 from backend.app.ml.tracking import setup_mlflow
 
@@ -36,6 +37,10 @@ async def lifespan(app: FastAPI):
         "prediction_latency_max_seconds": 0.0,
     }
     app.state.prediction_latency_samples = deque(maxlen=1000)
+
+    # Initialize audit database schema idempotently prior to MLflow setup
+    migrate_audit_database_idempotent(settings.lifecycle_audit_db_path)
+
     logger.info(
         "model_loading_started model_name=%s model_alias=%s",
         settings.model_name,
