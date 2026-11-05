@@ -12,15 +12,18 @@ from prometheus_client import CONTENT_TYPE_LATEST
 from starlette.responses import Response
 
 from backend.app.api.schemas import (
+    ActiveJobResponse,
     ChurnPredictionRequest,
     DriftAssessmentResponse,
     DriftAssessRequest,
     DriftBatchRequest,
     PromotionAuditRecord,
+    RetrainingJobResponse,
 )
 from backend.app.config import settings
 from backend.app.ml.audit import AuditDatabaseError, get_promotion_audit_records
 from backend.app.ml.drift import detect_data_drift
+from backend.app.ml.jobs import get_active_job, get_job
 from backend.app.ml.migrations import migrate_audit_database_idempotent
 from backend.app.ml.registry import load_registered_model_by_alias
 from backend.app.ml.retraining import evaluate_retraining_policy
@@ -477,3 +480,86 @@ def get_promotion_audits(
         ) from None
 
     return [PromotionAuditRecord.model_validate(record) for record in records]
+
+
+@app.get(
+    "/retraining/jobs/active",
+    response_model=ActiveJobResponse,
+    status_code=200,
+    responses={
+        503: {
+            "description": "Retraining job service unavailable.",
+        }
+    },
+)
+def get_active_retraining_job() -> ActiveJobResponse:
+    """Retrieve the current active retraining job if one exists.
+
+    Returns HTTP 200 with ``active=false`` and ``job=null`` when no job is active.
+    Strictly read-only; does not mutate leases, heartbeats, or attempts.
+    """
+    try:
+        active_job = get_active_job(
+            database_path=settings.lifecycle_audit_db_path,
+        )
+    except Exception:
+        logger.exception("active_retraining_job_retrieval_failed")
+        raise HTTPException(
+            status_code=503,
+            detail="The retraining job service is unavailable.",
+        ) from None
+
+    if active_job is None:
+        return ActiveJobResponse(active=False, job=None)
+
+    return ActiveJobResponse(
+        active=True,
+        job=RetrainingJobResponse.model_validate(active_job),
+    )
+
+
+@app.get(
+    "/retraining/jobs/{job_id}",
+    response_model=RetrainingJobResponse,
+    status_code=200,
+    responses={
+        404: {
+            "description": "Retraining job not found.",
+        },
+        503: {
+            "description": "Retraining job service unavailable.",
+        },
+    },
+)
+def get_retraining_job_by_id(job_id: str) -> RetrainingJobResponse:
+    """Retrieve retraining job details by unique job ID.
+
+    Returns HTTP 404 when the specified job does not exist.
+    Strictly read-only; does not mutate leases, heartbeats, or attempts.
+    """
+    clean_job_id = job_id.strip() if job_id else ""
+    if not clean_job_id:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Retraining job '{job_id}' not found.",
+        )
+
+    try:
+        job = get_job(
+            database_path=settings.lifecycle_audit_db_path,
+            job_id=clean_job_id,
+        )
+    except Exception:
+        logger.exception("retraining_job_by_id_retrieval_failed")
+        raise HTTPException(
+            status_code=503,
+            detail="The retraining job service is unavailable.",
+        ) from None
+
+    if job is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Retraining job '{clean_job_id}' not found.",
+        )
+
+    return RetrainingJobResponse.model_validate(job)
