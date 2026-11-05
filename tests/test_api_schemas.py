@@ -2,11 +2,13 @@ import pytest
 from pydantic import ValidationError
 
 from backend.app.api.schemas import (
+    ActiveJobResponse,
     ChurnPredictionRequest,
     DriftAssessmentResponse,
     DriftAssessRequest,
     PromotionAuditRecord,
     QueuedJobSummary,
+    RetrainingJobResponse,
 )
 
 
@@ -252,3 +254,100 @@ def test_drift_assessment_response_active_job_exists():
     assert resp.active_job_id == "job-pre-456"
     assert resp.alert_id == "alert-789"
     assert resp.cooldown_remaining_seconds is None
+
+
+def test_retraining_job_response_sanitization_and_exclusions():
+    """Verify RetrainingJobResponse excludes secrets and internal fields."""
+    source_dict = {
+        "job_id": "job-abc-123",
+        "created_at": "2026-11-05T08:00:00+00:00",
+        "started_at": "2026-11-05T08:01:00+00:00",
+        "completed_at": None,
+        "status": "running",
+        "is_active": 1,
+        "dataset_id": "churn-ds",
+        "trigger_source": "drift_assess",
+        "worker_id": "worker-1",
+        "lease_token": "lease-secret-token",
+        "heartbeat_at": "2026-11-05T08:02:00+00:00",
+        "lease_expires_at": "2026-11-05T08:03:00+00:00",
+        "attempt_count": 1,
+        "max_attempts": 3,
+        "candidate_version": "v2",
+        "candidate_run_id": "run-xyz",
+        "previous_champion_version": "v1",
+        "promotion_started_at": None,
+        "promotion_approved": None,
+        "promotion_reason": None,
+        "promotion_audit_id": None,
+        "failure_reason": None,
+        "alert_id": "alert-456",
+        "payload": {"arbitrary": "internal_data"},
+    }
+    source_copy = source_dict.copy()
+
+    job_resp = RetrainingJobResponse.model_validate(source_dict)
+
+    # Verify source dictionary was NOT mutated
+    assert source_dict == source_copy
+
+    # Verify public fields
+    assert job_resp.job_id == "job-abc-123"
+    assert job_resp.status == "running"
+    assert job_resp.is_active is True
+    assert job_resp.dataset_id == "churn-ds"
+    assert job_resp.trigger_source == "drift_assess"
+    assert job_resp.created_at == "2026-11-05T08:00:00+00:00"
+    assert job_resp.started_at == "2026-11-05T08:01:00+00:00"
+    assert job_resp.attempt_count == 1
+    assert job_resp.max_attempts == 3
+    assert job_resp.candidate_version == "v2"
+    assert job_resp.alert_id == "alert-456"
+
+    # Verify mandatory excluded fields are absent
+    dumped = job_resp.model_dump()
+    excluded_fields = (
+        "lease_token",
+        "worker_id",
+        "heartbeat_at",
+        "lease_expires_at",
+        "payload",
+    )
+    for excluded in excluded_fields:
+        assert excluded not in dumped
+
+
+def test_retraining_job_response_missing_required_fields_fails():
+    """Verify RetrainingJobResponse fails when essential fields are missing."""
+    with pytest.raises(ValidationError):
+        RetrainingJobResponse.model_validate(
+            {
+                "status": "queued",
+                "dataset_id": "churn-ds",
+            }
+        )
+
+
+def test_active_job_response_envelope():
+    """Verify ActiveJobResponse envelope formatting for active and inactive states."""
+    # When inactive
+    resp_inactive = ActiveJobResponse(active=False, job=None)
+    assert resp_inactive.active is False
+    assert resp_inactive.job is None
+    assert resp_inactive.model_dump() == {"active": False, "job": None}
+
+    # When active
+    job = RetrainingJobResponse.model_validate(
+        {
+            "job_id": "job-1",
+            "status": "queued",
+            "is_active": 1,
+            "dataset_id": "ds",
+            "trigger_source": "manual",
+            "created_at": "2026-11-05T08:00:00+00:00",
+        }
+    )
+    resp_active = ActiveJobResponse(active=True, job=job)
+    assert resp_active.active is True
+    assert resp_active.job is not None
+    assert resp_active.job.job_id == "job-1"
