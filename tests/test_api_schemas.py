@@ -1,7 +1,13 @@
 import pytest
 from pydantic import ValidationError
 
-from backend.app.api.schemas import ChurnPredictionRequest, PromotionAuditRecord
+from backend.app.api.schemas import (
+    ChurnPredictionRequest,
+    DriftAssessmentResponse,
+    DriftAssessRequest,
+    PromotionAuditRecord,
+    QueuedJobSummary,
+)
 
 
 def test_valid_prediction_request():
@@ -124,3 +130,125 @@ def test_promotion_audit_record_missing_required_fields():
             audit_id="audit-123",
             # missing timestamp, model_name, approved, reason, etc.
         )
+
+
+def test_valid_drift_assess_request():
+    req = DriftAssessRequest(
+        records=[
+            ChurnPredictionRequest(
+                age=35,
+                tenure=24,
+                monthly_charges=79.99,
+                contract_type="month-to-month",
+                support_tickets=2,
+            )
+        ],
+        dataset_id="batch_2026_11",
+        trigger_source="custom_trigger",
+        alert_id="alert-99",
+    )
+    assert len(req.records) == 1
+    assert req.dataset_id == "batch_2026_11"
+    assert req.trigger_source == "custom_trigger"
+    assert req.alert_id == "alert-99"
+
+
+def test_drift_assess_request_default_trigger_source():
+    req = DriftAssessRequest(
+        records=[
+            ChurnPredictionRequest(
+                age=35,
+                tenure=24,
+                monthly_charges=79.99,
+                contract_type="month-to-month",
+                support_tickets=2,
+            )
+        ],
+        dataset_id="batch_2026_11",
+    )
+    assert req.trigger_source == "drift_assess"
+    assert req.alert_id is None
+
+
+def test_drift_assess_request_rejects_empty_records():
+    with pytest.raises(ValidationError):
+        DriftAssessRequest(
+            records=[],
+            dataset_id="batch_2026_11",
+        )
+
+
+def test_drift_assess_request_rejects_empty_dataset_id():
+    with pytest.raises(ValidationError):
+        DriftAssessRequest(
+            records=[
+                ChurnPredictionRequest(
+                    age=35,
+                    tenure=24,
+                    monthly_charges=79.99,
+                    contract_type="month-to-month",
+                    support_tickets=2,
+                )
+            ],
+            dataset_id="   ",
+        )
+
+
+def test_valid_drift_assessment_response():
+    resp = DriftAssessmentResponse(
+        status="queued",
+        retraining_recommended=True,
+        drift_detected=True,
+        drift_report={"status": "drift_detected", "drift_detected": True},
+        job=QueuedJobSummary(
+            job_id="job-123",
+            status="queued",
+            dataset_id="ds-1",
+            trigger_source="drift_assess",
+            created_at="2026-11-05T12:00:00Z",
+            alert_id=None,
+        ),
+        cooldown_remaining_seconds=None,
+        reason="feature_drift_detected_job_queued",
+    )
+    assert resp.status == "queued"
+    assert resp.retraining_recommended is True
+    assert resp.job is not None
+    assert resp.job.job_id == "job-123"
+    assert resp.cooldown_remaining_seconds is None
+
+
+def test_drift_assessment_response_cooldown_active():
+    resp = DriftAssessmentResponse(
+        status="cooldown_active",
+        retraining_recommended=False,
+        drift_detected=True,
+        drift_report={"status": "drift_detected", "drift_detected": True},
+        job=None,
+        cooldown_remaining_seconds=1200,
+        reason="cooldown_active",
+    )
+    assert resp.status == "cooldown_active"
+    assert resp.retraining_recommended is False
+    assert resp.job is None
+    assert resp.cooldown_remaining_seconds == 1200
+
+
+def test_drift_assessment_response_active_job_exists():
+    resp = DriftAssessmentResponse(
+        status="active_job_exists",
+        retraining_recommended=False,
+        drift_detected=True,
+        drift_report={"status": "drift_detected", "drift_detected": True},
+        job=None,
+        active_job_id="job-pre-456",
+        alert_id="alert-789",
+        cooldown_remaining_seconds=None,
+        reason="active_job_exists",
+    )
+    assert resp.status == "active_job_exists"
+    assert resp.retraining_recommended is False
+    assert resp.job is None
+    assert resp.active_job_id == "job-pre-456"
+    assert resp.alert_id == "alert-789"
+    assert resp.cooldown_remaining_seconds is None

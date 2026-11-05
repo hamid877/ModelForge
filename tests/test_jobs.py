@@ -641,3 +641,91 @@ def test_requeue_job_for_retry_blocked_when_attempts_exhausted(migrated_db):
             failure_reason="Attempts exhausted",
         )
     assert "exhausted" in str(exc_info.value).lower()
+
+
+def test_create_queued_job_with_conn_in_transaction(migrated_db):
+    """create_queued_job supports caller-provided conn in an open transaction."""
+    from backend.app.ml.db import db_connection, immediate_transaction
+
+    with db_connection(migrated_db, isolation_level=None) as conn:
+        with immediate_transaction(conn):
+            job = create_queued_job(
+                conn=conn,
+                dataset_id="ds-conn-tx",
+                trigger_source="drift_assess",
+            )
+            assert job["dataset_id"] == "ds-conn-tx"
+            assert job["status"] == "queued"
+            assert job["is_active"] == 1
+
+    fetched = get_job(migrated_db, job_id=job["job_id"])
+    assert fetched is not None
+    assert fetched["job_id"] == job["job_id"]
+
+
+def test_create_queued_job_with_conn_autocommit(migrated_db):
+    """create_queued_job wraps an immediate tx when conn is not in tx."""
+    from backend.app.ml.db import db_connection
+
+    with db_connection(migrated_db, isolation_level=None) as conn:
+        job = create_queued_job(
+            conn=conn,
+            dataset_id="ds-conn-notx",
+            trigger_source="manual",
+        )
+        assert job["dataset_id"] == "ds-conn-notx"
+        assert job["status"] == "queued"
+
+    fetched = get_job(migrated_db, job_id=job["job_id"])
+    assert fetched is not None
+    assert fetched["job_id"] == job["job_id"]
+
+
+def test_create_queued_job_reraises_unrelated_integrity_errors(migrated_db):
+    """Unrelated integrity errors are not masked as active conflict."""
+    # 1. Create a job and transition it to a terminal state (is_active = NULL)
+    job1 = create_queued_job(
+        migrated_db,
+        job_id="fixed-job-id-1",
+        dataset_id="ds-pk-1",
+        trigger_source="manual",
+    )
+    claimed = claim_queued_job(
+        migrated_db,
+        worker_id="w-pk",
+        job_id=job1["job_id"],
+    )
+    assert claimed is not None
+    transition_job_status(
+        migrated_db,
+        job_id=job1["job_id"],
+        worker_id="w-pk",
+        lease_token=claimed["lease_token"],
+        target_status="succeeded",
+    )
+
+    # There is currently NO active job in the database
+    assert get_active_job(migrated_db) is None
+
+    # Now attempt to insert a job with the SAME primary key 'fixed-job-id-1'.
+    # This violates the PRIMARY KEY unique constraint, not
+    # idx_single_active_retraining_job.
+    # It must raise sqlite3.IntegrityError, NOT ActiveJobExistsError.
+    with pytest.raises(sqlite3.IntegrityError) as exc_info:
+        create_queued_job(
+            migrated_db,
+            job_id="fixed-job-id-1",
+            dataset_id="ds-pk-duplicate",
+            trigger_source="manual",
+        )
+    assert not isinstance(exc_info.value, ActiveJobExistsError)
+
+    # 2. Foreign key violation on alert_id must raise sqlite3.IntegrityError
+    with pytest.raises(sqlite3.IntegrityError) as fk_exc:
+        create_queued_job(
+            migrated_db,
+            dataset_id="ds-fk",
+            trigger_source="drift",
+            alert_id="non-existent-alert-id",
+        )
+    assert not isinstance(fk_exc.value, ActiveJobExistsError)
