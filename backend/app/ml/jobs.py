@@ -78,6 +78,7 @@ def create_queued_job(
     max_attempts: int | None = None,
     payload: Mapping[str, Any] | None = None,
     job_id: str | None = None,
+    conn: sqlite3.Connection | None = None,
 ) -> dict[str, Any]:
     """Create a new retraining job in queued state.
 
@@ -85,13 +86,18 @@ def create_queued_job(
     raises ActiveJobExistsError.
 
     Args:
-        database_path: Optional path to SQLite database.
+        database_path: Optional path to SQLite database. Ignored when ``conn``
+            is supplied.
         dataset_id: Dataset identifier for retraining.
         trigger_source: Source that requested retraining (e.g. 'manual', 'drift').
         alert_id: Optional drift alert ID foreign key reference.
         max_attempts: Maximum retry attempts before failure. Defaults to settings.
         payload: Optional arbitrary metadata payload mapping.
         job_id: Optional custom job ID. If None, generated as 'job-<uuid4>'.
+        conn: Optional active SQLite connection for transactional composition.
+            When provided, the INSERT is executed on this connection; the caller
+            is responsible for transaction management.  ``database_path`` is
+            ignored in this case.
 
     Returns:
         Dictionary representing the created job record.
@@ -113,48 +119,58 @@ def create_queued_job(
     created_at = datetime.now(UTC).isoformat()
     serialized_payload = json.dumps(dict(payload or {}), allow_nan=False)
 
-    with db_connection(database_path, isolation_level=None) as conn:
-        with immediate_transaction(conn):
-            try:
-                conn.execute(
-                    """
-                    INSERT INTO retraining_jobs (
-                        job_id, created_at, status, is_active, dataset_id,
-                        trigger_source, alert_id, attempt_count, max_attempts, payload
-                    ) VALUES (
-                        ?, ?, 'queued', 1, ?,
-                        ?, ?, 0, ?, ?
-                    );
-                    """,
-                    (
-                        jid,
-                        created_at,
-                        dataset_id.strip(),
-                        trigger_source.strip(),
-                        alert_id,
-                        effective_max_attempts,
-                        serialized_payload,
-                    ),
-                )
-            except sqlite3.IntegrityError as exc:
-                exc_str = str(exc).lower()
-                if (
-                    "idx_single_active_retraining_job" in exc_str
-                    or "retraining_jobs.is_active" in exc_str
-                ):
-                    raise ActiveJobExistsError(
-                        "Cannot create queued job: An active retraining job "
-                        "already exists in the system."
-                    ) from exc
-                raise
-
-            cursor = conn.execute(
-                "SELECT * FROM retraining_jobs WHERE job_id = ?;", (jid,)
+    def _execute_insert(target_conn: sqlite3.Connection) -> dict[str, Any]:
+        try:
+            target_conn.execute(
+                """
+                INSERT INTO retraining_jobs (
+                    job_id, created_at, status, is_active, dataset_id,
+                    trigger_source, alert_id, attempt_count, max_attempts, payload
+                ) VALUES (
+                    ?, ?, 'queued', 1, ?,
+                    ?, ?, 0, ?, ?
+                );
+                """,
+                (
+                    jid,
+                    created_at,
+                    dataset_id.strip(),
+                    trigger_source.strip(),
+                    alert_id,
+                    effective_max_attempts,
+                    serialized_payload,
+                ),
             )
-            row = cursor.fetchone()
-            if row is None:
-                raise JobNotFoundError(f"Created job '{jid}' could not be fetched.")
-            return _row_to_dict(cursor, row)
+        except sqlite3.IntegrityError as exc:
+            exc_str = str(exc).lower()
+            if (
+                "idx_single_active_retraining_job" in exc_str
+                or "retraining_jobs.is_active" in exc_str
+            ):
+                raise ActiveJobExistsError(
+                    "Cannot create queued job: An active retraining job "
+                    "already exists in the system."
+                ) from exc
+            raise
+
+        cursor = target_conn.execute(
+            "SELECT * FROM retraining_jobs WHERE job_id = ?;", (jid,)
+        )
+        row = cursor.fetchone()
+        if row is None:
+            raise JobNotFoundError(f"Created job '{jid}' could not be fetched.")
+        return _row_to_dict(cursor, row)
+
+    if conn is not None:
+        # Caller owns the transaction; execute directly on the provided connection.
+        if conn.in_transaction:
+            return _execute_insert(conn)
+        with immediate_transaction(conn):
+            return _execute_insert(conn)
+
+    with db_connection(database_path, isolation_level=None) as new_conn:
+        with immediate_transaction(new_conn):
+            return _execute_insert(new_conn)
 
 
 def claim_queued_job(
