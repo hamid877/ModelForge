@@ -1104,3 +1104,558 @@ def test_lifespan_migration_failure_aborts_startup(monkeypatch):
                 pass
 
     assert not mlflow_called
+
+
+@patch("backend.app.api.api.load_registered_model_by_alias")
+def test_drift_endpoint_unchanged_does_not_queue_job(mock_load_model, tmp_path):
+    """POST /monitoring/drift remains raw and unchanged; does not queue any job."""
+    from backend.app.ml.jobs import get_active_job
+    from backend.app.ml.migrations import migrate_audit_database_idempotent
+
+    mock_load_model.return_value.predict.return_value = [0]
+    db_path = tmp_path / "lifecycle.db"
+    migrate_audit_database_idempotent(db_path)
+
+    reference = pd.DataFrame(
+        {
+            "age": list(range(20, 40)),
+            "tenure": list(range(1, 21)),
+            "monthly_charges": [50.0 + i for i in range(20)],
+            "contract_type": ["monthly", "annual"] * 10,
+            "support_tickets": list(range(20)),
+        }
+    )
+    ref_file = tmp_path / "ref.csv"
+    reference.to_csv(ref_file, index=False)
+
+    # Drifting batch
+    drifting_records = reference.iloc[:15].copy()
+    drifting_records["tenure"] += 50
+    records = drifting_records.to_dict(orient="records")
+
+    with (
+        patch("backend.app.api.api.settings.drift_reference_path", str(ref_file)),
+        patch("backend.app.api.api.settings.drift_min_samples", 10),
+        patch("backend.app.api.api.settings.lifecycle_audit_db_path", str(db_path)),
+        TestClient(app) as client,
+    ):
+        response = client.post("/monitoring/drift", json={"records": records})
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["drift_detected"] is True
+    # Ensure raw report has no job field
+    assert "job" not in data
+    # Ensure no job was queued in the database
+    assert get_active_job(db_path) is None
+
+
+@patch("backend.app.api.api.load_registered_model_by_alias")
+def test_drift_assess_queues_job_when_drift_detected(mock_load_model, tmp_path):
+    """POST /monitoring/drift/assess detects drift and queues a retraining job."""
+    from backend.app.ml.jobs import get_active_job
+    from backend.app.ml.migrations import migrate_audit_database_idempotent
+
+    mock_load_model.return_value.predict.return_value = [0]
+    db_path = tmp_path / "lifecycle.db"
+    migrate_audit_database_idempotent(db_path)
+
+    reference = pd.DataFrame(
+        {
+            "age": list(range(20, 40)),
+            "tenure": list(range(1, 21)),
+            "monthly_charges": [50.0 + i for i in range(20)],
+            "contract_type": ["monthly", "annual"] * 10,
+            "support_tickets": list(range(20)),
+        }
+    )
+    ref_file = tmp_path / "ref.csv"
+    reference.to_csv(ref_file, index=False)
+
+    drifting_records = reference.iloc[:15].copy()
+    drifting_records["tenure"] += 50
+    records = drifting_records.to_dict(orient="records")
+
+    payload = {
+        "records": records,
+        "dataset_id": "dataset-drift-batch-1",
+        "trigger_source": "drift_assess",
+    }
+
+    with (
+        patch("backend.app.api.api.settings.drift_reference_path", str(ref_file)),
+        patch("backend.app.api.api.settings.drift_min_samples", 10),
+        patch("backend.app.api.api.settings.lifecycle_audit_db_path", str(db_path)),
+        TestClient(app) as client,
+    ):
+        response = client.post("/monitoring/drift/assess", json=payload)
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "queued"
+    assert data["retraining_recommended"] is True
+    assert data["drift_detected"] is True
+    assert data["job"] is not None
+    assert data["job"]["dataset_id"] == "dataset-drift-batch-1"
+    assert data["job"]["status"] == "queued"
+    assert data["cooldown_remaining_seconds"] is None
+
+    # Check database persistence
+    active_job = get_active_job(db_path)
+    assert active_job is not None
+    assert active_job["job_id"] == data["job"]["job_id"]
+    assert active_job["status"] == "queued"
+
+    from backend.app.ml.drift_alerts import get_alert_actions, list_drift_alerts
+
+    alerts = list_drift_alerts(db_path)
+    assert len(alerts) == 1
+    actions = get_alert_actions(alerts[0]["alert_id"], database_path=db_path)
+    assert len(actions) == 1
+    assert actions[0]["action_type"] == "triggered_retraining"
+    assert actions[0]["job_id"] == data["job"]["job_id"]
+
+
+@patch("backend.app.api.api.load_registered_model_by_alias")
+def test_drift_assess_insufficient_data(mock_load_model, tmp_path):
+    """POST /monitoring/drift/assess reports insufficient_data and does not queue."""
+    from backend.app.ml.jobs import get_active_job
+    from backend.app.ml.migrations import migrate_audit_database_idempotent
+
+    mock_load_model.return_value.predict.return_value = [0]
+    db_path = tmp_path / "lifecycle.db"
+    migrate_audit_database_idempotent(db_path)
+
+    reference = pd.DataFrame(
+        {
+            "age": list(range(20, 40)),
+            "tenure": list(range(1, 21)),
+            "monthly_charges": [50.0 + i for i in range(20)],
+            "contract_type": ["monthly", "annual"] * 10,
+            "support_tickets": list(range(20)),
+        }
+    )
+    ref_file = tmp_path / "ref.csv"
+    reference.to_csv(ref_file, index=False)
+
+    small_records = reference.iloc[:5].to_dict(orient="records")
+
+    payload = {
+        "records": small_records,
+        "dataset_id": "dataset-small",
+    }
+
+    with (
+        patch("backend.app.api.api.settings.drift_reference_path", str(ref_file)),
+        patch("backend.app.api.api.settings.drift_min_samples", 10),
+        patch("backend.app.api.api.settings.lifecycle_audit_db_path", str(db_path)),
+        TestClient(app) as client,
+    ):
+        response = client.post("/monitoring/drift/assess", json=payload)
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "insufficient_data"
+    assert data["retraining_recommended"] is False
+    assert data["drift_detected"] is None
+    assert data["job"] is None
+    assert get_active_job(db_path) is None
+
+    from backend.app.ml.db import db_connection
+
+    with db_connection(db_path, isolation_level=None) as conn:
+        assert conn.execute("SELECT count(*) FROM drift_alerts;").fetchone()[0] == 0
+        assert (
+            conn.execute("SELECT count(*) FROM drift_alert_actions;").fetchone()[0] == 0
+        )
+        assert conn.execute("SELECT count(*) FROM retraining_jobs;").fetchone()[0] == 0
+
+
+@patch("backend.app.api.api.load_registered_model_by_alias")
+def test_drift_assess_stable_no_drift(mock_load_model, tmp_path):
+    """POST /monitoring/drift/assess reports stable and does not queue when no drift."""
+    from backend.app.ml.jobs import get_active_job
+    from backend.app.ml.migrations import migrate_audit_database_idempotent
+
+    mock_load_model.return_value.predict.return_value = [0]
+    db_path = tmp_path / "lifecycle.db"
+    migrate_audit_database_idempotent(db_path)
+
+    reference = pd.DataFrame(
+        {
+            "age": list(range(20, 40)),
+            "tenure": list(range(1, 21)),
+            "monthly_charges": [50.0 + i for i in range(20)],
+            "contract_type": ["monthly", "annual"] * 10,
+            "support_tickets": list(range(20)),
+        }
+    )
+    ref_file = tmp_path / "ref.csv"
+    reference.to_csv(ref_file, index=False)
+
+    records = reference.iloc[:15].to_dict(orient="records")
+
+    payload = {
+        "records": records,
+        "dataset_id": "dataset-stable",
+    }
+
+    with (
+        patch("backend.app.api.api.settings.drift_reference_path", str(ref_file)),
+        patch("backend.app.api.api.settings.drift_min_samples", 10),
+        patch("backend.app.api.api.settings.lifecycle_audit_db_path", str(db_path)),
+        TestClient(app) as client,
+    ):
+        response = client.post("/monitoring/drift/assess", json=payload)
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "stable"
+    assert data["retraining_recommended"] is False
+    assert data["drift_detected"] is False
+    assert data["job"] is None
+    assert get_active_job(db_path) is None
+
+    from backend.app.ml.drift_alerts import get_alert_actions, list_drift_alerts
+
+    alerts = list_drift_alerts(db_path)
+    assert len(alerts) == 1
+    assert alerts[0]["drift_detected"] is False
+    actions = get_alert_actions(alerts[0]["alert_id"], database_path=db_path)
+    assert len(actions) == 1
+    assert actions[0]["action_type"] == "drift_assessed_stable"
+    assert actions[0]["job_id"] is None
+
+
+@patch("backend.app.api.api.load_registered_model_by_alias")
+def test_drift_assess_active_job_exists(mock_load_model, tmp_path):
+    """POST /monitoring/drift/assess returns HTTP 409 when a job is active."""
+    from backend.app.ml.jobs import create_queued_job
+    from backend.app.ml.migrations import migrate_audit_database_idempotent
+
+    mock_load_model.return_value.predict.return_value = [0]
+    db_path = tmp_path / "lifecycle.db"
+    migrate_audit_database_idempotent(db_path)
+
+    # Pre-existing active job
+    pre_job = create_queued_job(
+        db_path,
+        dataset_id="existing-job-dataset",
+        trigger_source="manual",
+    )
+
+    reference = pd.DataFrame(
+        {
+            "age": list(range(20, 40)),
+            "tenure": list(range(1, 21)),
+            "monthly_charges": [50.0 + i for i in range(20)],
+            "contract_type": ["monthly", "annual"] * 10,
+            "support_tickets": list(range(20)),
+        }
+    )
+    ref_file = tmp_path / "ref.csv"
+    reference.to_csv(ref_file, index=False)
+
+    drifting_records = reference.iloc[:15].copy()
+    drifting_records["tenure"] += 50
+    records = drifting_records.to_dict(orient="records")
+
+    payload = {
+        "records": records,
+        "dataset_id": "new-dataset",
+    }
+
+    with (
+        patch("backend.app.api.api.settings.drift_reference_path", str(ref_file)),
+        patch("backend.app.api.api.settings.drift_min_samples", 10),
+        patch("backend.app.api.api.settings.lifecycle_audit_db_path", str(db_path)),
+        TestClient(app) as client,
+    ):
+        response = client.post("/monitoring/drift/assess", json=payload)
+
+    assert response.status_code == 409
+    data = response.json()
+    assert data["status"] == "active_job_exists"
+    assert data["retraining_recommended"] is False
+    assert data["drift_detected"] is True
+    assert data["job"] is None
+    assert data["active_job_id"] == pre_job["job_id"]
+
+
+@patch("backend.app.api.api.load_registered_model_by_alias")
+def test_drift_assess_cooldown_active(mock_load_model, tmp_path):
+    """POST /monitoring/drift/assess reports cooldown_active when in cooldown."""
+    from datetime import UTC, datetime, timedelta
+
+    from backend.app.ml.db import db_connection, immediate_transaction
+    from backend.app.ml.jobs import (
+        claim_queued_job,
+        create_queued_job,
+        transition_job_status,
+    )
+    from backend.app.ml.migrations import migrate_audit_database_idempotent
+
+    mock_load_model.return_value.predict.return_value = [0]
+    db_path = tmp_path / "lifecycle.db"
+    migrate_audit_database_idempotent(db_path)
+
+    # Create a job that completed 15 minutes ago
+    job = create_queued_job(
+        db_path,
+        dataset_id="prev-job-dataset",
+        trigger_source="manual",
+    )
+    claimed = claim_queued_job(db_path, worker_id="w1", job_id=job["job_id"])
+    assert claimed is not None
+    transition_job_status(
+        db_path,
+        job_id=job["job_id"],
+        worker_id="w1",
+        lease_token=claimed["lease_token"],
+        target_status="succeeded",
+    )
+
+    recent_completed = (datetime.now(UTC) - timedelta(minutes=15)).isoformat()
+    with db_connection(db_path, isolation_level=None) as conn:
+        with immediate_transaction(conn):
+            conn.execute(
+                "UPDATE retraining_jobs SET completed_at = ? WHERE job_id = ?;",
+                (recent_completed, job["job_id"]),
+            )
+
+    reference = pd.DataFrame(
+        {
+            "age": list(range(20, 40)),
+            "tenure": list(range(1, 21)),
+            "monthly_charges": [50.0 + i for i in range(20)],
+            "contract_type": ["monthly", "annual"] * 10,
+            "support_tickets": list(range(20)),
+        }
+    )
+    ref_file = tmp_path / "ref.csv"
+    reference.to_csv(ref_file, index=False)
+
+    drifting_records = reference.iloc[:15].copy()
+    drifting_records["tenure"] += 50
+    records = drifting_records.to_dict(orient="records")
+
+    payload = {
+        "records": records,
+        "dataset_id": "dataset-cooldown",
+    }
+
+    with (
+        patch("backend.app.api.api.settings.drift_reference_path", str(ref_file)),
+        patch("backend.app.api.api.settings.drift_min_samples", 10),
+        patch("backend.app.api.api.settings.retraining_cooldown_seconds", 3600),
+        patch("backend.app.api.api.settings.lifecycle_audit_db_path", str(db_path)),
+        TestClient(app) as client,
+    ):
+        response = client.post("/monitoring/drift/assess", json=payload)
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "cooldown_active"
+    assert data["retraining_recommended"] is False
+    assert data["drift_detected"] is True
+    assert data["job"] is None
+    assert data["cooldown_remaining_seconds"] is not None
+    # 3600 - 900 = ~2700 seconds
+    assert 2600 <= data["cooldown_remaining_seconds"] <= 2800
+
+
+@patch("backend.app.api.api.load_registered_model_by_alias")
+def test_drift_assess_failed_and_rejected_jobs_do_not_extend_cooldown(
+    mock_load_model, tmp_path
+):
+    """POST /monitoring/drift/assess ignores failed/rejected jobs for cooldown."""
+    from datetime import UTC, datetime, timedelta
+
+    from backend.app.ml.db import db_connection, immediate_transaction
+    from backend.app.ml.jobs import (
+        claim_queued_job,
+        create_queued_job,
+        transition_job_status,
+    )
+    from backend.app.ml.migrations import migrate_audit_database_idempotent
+
+    mock_load_model.return_value.predict.return_value = [0]
+    db_path = tmp_path / "lifecycle.db"
+    migrate_audit_database_idempotent(db_path)
+
+    now = datetime.now(UTC)
+
+    # 1. Successful job from 2 hours ago (outside 3600s cooldown)
+    succ_job = create_queued_job(db_path, dataset_id="ds-succ", trigger_source="manual")
+    c1 = claim_queued_job(db_path, worker_id="w1", job_id=succ_job["job_id"])
+    assert c1 is not None
+    transition_job_status(
+        db_path,
+        job_id=succ_job["job_id"],
+        worker_id="w1",
+        lease_token=c1["lease_token"],
+        target_status="succeeded",
+    )
+    succ_completed = (now - timedelta(seconds=7200)).isoformat()
+
+    # 2. Failed job from 10 minutes ago
+    fail_job = create_queued_job(db_path, dataset_id="ds-fail", trigger_source="manual")
+    c2 = claim_queued_job(db_path, worker_id="w2", job_id=fail_job["job_id"])
+    assert c2 is not None
+    transition_job_status(
+        db_path,
+        job_id=fail_job["job_id"],
+        worker_id="w2",
+        lease_token=c2["lease_token"],
+        target_status="failed",
+        failure_reason="Handler crashed",
+    )
+    fail_completed = (now - timedelta(seconds=600)).isoformat()
+
+    with db_connection(db_path, isolation_level=None) as conn:
+        with immediate_transaction(conn):
+            conn.execute(
+                "UPDATE retraining_jobs SET completed_at = ? WHERE job_id = ?;",
+                (succ_completed, succ_job["job_id"]),
+            )
+            conn.execute(
+                "UPDATE retraining_jobs SET completed_at = ? WHERE job_id = ?;",
+                (fail_completed, fail_job["job_id"]),
+            )
+
+    reference = pd.DataFrame(
+        {
+            "age": list(range(20, 40)),
+            "tenure": list(range(1, 21)),
+            "monthly_charges": [50.0 + i for i in range(20)],
+            "contract_type": ["monthly", "annual"] * 10,
+            "support_tickets": list(range(20)),
+        }
+    )
+    ref_file = tmp_path / "ref.csv"
+    reference.to_csv(ref_file, index=False)
+
+    drifting_records = reference.iloc[:15].copy()
+    drifting_records["tenure"] += 50
+    records = drifting_records.to_dict(orient="records")
+
+    payload = {
+        "records": records,
+        "dataset_id": "dataset-not-blocked-by-fail",
+    }
+
+    with (
+        patch("backend.app.api.api.settings.drift_reference_path", str(ref_file)),
+        patch("backend.app.api.api.settings.drift_min_samples", 10),
+        patch("backend.app.api.api.settings.retraining_cooldown_seconds", 3600),
+        patch("backend.app.api.api.settings.lifecycle_audit_db_path", str(db_path)),
+        TestClient(app) as client,
+    ):
+        response = client.post("/monitoring/drift/assess", json=payload)
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "queued"
+    assert data["retraining_recommended"] is True
+    assert data["job"] is not None
+    assert data["job"]["dataset_id"] == "dataset-not-blocked-by-fail"
+
+
+@patch("backend.app.api.api.load_registered_model_by_alias")
+def test_drift_assess_rejects_invalid_inputs(mock_load_model):
+    """POST /monitoring/drift/assess validates fields and rejects invalid requests."""
+    mock_load_model.return_value.predict.return_value = [0]
+
+    with TestClient(app) as client:
+        # Missing dataset_id
+        res1 = client.post(
+            "/monitoring/drift/assess",
+            json={
+                "records": [
+                    {
+                        "age": 30,
+                        "tenure": 10,
+                        "monthly_charges": 50.0,
+                        "contract_type": "monthly",
+                        "support_tickets": 1,
+                    }
+                ]
+            },
+        )
+        assert res1.status_code == 422
+
+        # Empty records
+        res2 = client.post(
+            "/monitoring/drift/assess",
+            json={
+                "records": [],
+                "dataset_id": "ds-1",
+            },
+        )
+        assert res2.status_code == 422
+
+        # Empty dataset_id string
+        res3 = client.post(
+            "/monitoring/drift/assess",
+            json={
+                "records": [
+                    {
+                        "age": 30,
+                        "tenure": 10,
+                        "monthly_charges": 50.0,
+                        "contract_type": "monthly",
+                        "support_tickets": 1,
+                    }
+                ],
+                "dataset_id": "   ",
+            },
+        )
+        assert res3.status_code == 422
+
+
+@patch("backend.app.api.api.load_registered_model_by_alias")
+def test_drift_assess_does_not_trigger_sync_training_or_promotion(
+    mock_load_model, tmp_path
+):
+    """POST /monitoring/drift/assess strictly does NOT execute training or promotion."""
+    from backend.app.ml.migrations import migrate_audit_database_idempotent
+
+    mock_load_model.return_value.predict.return_value = [0]
+    db_path = tmp_path / "lifecycle.db"
+    migrate_audit_database_idempotent(db_path)
+
+    reference = pd.DataFrame(
+        {
+            "age": list(range(20, 40)),
+            "tenure": list(range(1, 21)),
+            "monthly_charges": [50.0 + i for i in range(20)],
+            "contract_type": ["monthly", "annual"] * 10,
+            "support_tickets": list(range(20)),
+        }
+    )
+    ref_file = tmp_path / "ref.csv"
+    reference.to_csv(ref_file, index=False)
+
+    drifting_records = reference.iloc[:15].copy()
+    drifting_records["tenure"] += 50
+    records = drifting_records.to_dict(orient="records")
+
+    payload = {
+        "records": records,
+        "dataset_id": "dataset-async-check",
+    }
+
+    with (
+        patch("backend.app.api.api.settings.drift_reference_path", str(ref_file)),
+        patch("backend.app.api.api.settings.drift_min_samples", 10),
+        patch("backend.app.api.api.settings.lifecycle_audit_db_path", str(db_path)),
+        patch("backend.app.ml.retraining.run_training") as mock_train,
+        patch("backend.app.ml.promotion.promote_model") as mock_promote,
+        TestClient(app) as client,
+    ):
+        response = client.post("/monitoring/drift/assess", json=payload)
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "queued"
+    mock_train.assert_not_called()
+    mock_promote.assert_not_called()

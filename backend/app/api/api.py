@@ -13,6 +13,8 @@ from starlette.responses import Response
 
 from backend.app.api.schemas import (
     ChurnPredictionRequest,
+    DriftAssessmentResponse,
+    DriftAssessRequest,
     DriftBatchRequest,
     PromotionAuditRecord,
 )
@@ -21,6 +23,7 @@ from backend.app.ml.audit import AuditDatabaseError, get_promotion_audit_records
 from backend.app.ml.drift import detect_data_drift
 from backend.app.ml.migrations import migrate_audit_database_idempotent
 from backend.app.ml.registry import load_registered_model_by_alias
+from backend.app.ml.retraining import evaluate_retraining_policy
 from backend.app.ml.tracking import setup_mlflow
 
 logger = logging.getLogger(__name__)
@@ -342,6 +345,115 @@ def monitor_data_drift(
             status_code=422,
             detail="Drift detection could not process the supplied datasets.",
         ) from None
+
+
+@app.post(
+    "/monitoring/drift/assess",
+    response_model=DriftAssessmentResponse,
+    status_code=200,
+    responses={
+        409: {
+            "model": DriftAssessmentResponse,
+            "description": "Active retraining job already exists in the system.",
+        }
+    },
+)
+def drift_assess_and_queue(
+    request: DriftAssessRequest,
+    api_request: Request,
+) -> DriftAssessmentResponse | JSONResponse:
+    """Evaluate drift and retraining eligibility; queue a job when appropriate.
+
+    This endpoint extends ``POST /monitoring/drift`` with stateful retraining
+    policy evaluation.  The existing ``/monitoring/drift`` endpoint is preserved
+    unchanged and returns a raw drift report without any job-queue interaction.
+
+    Policy decision sequence:
+    1. Insufficient data → ``status='insufficient_data'``, no job queued.
+    2. No drift detected → ``status='stable'``, alert persisted, no job queued.
+    3. Active job exists → ``status='active_job_exists'``, alert persisted,
+       returns HTTP 409 with ``active_job_id``, no job queued.
+    4. Cooldown not elapsed → ``status='cooldown_active'``, alert persisted,
+       no job queued.
+    5. Otherwise → retraining job queued → ``status='queued'``.
+
+    The drift detection, active-job check, cooldown evaluation, and job
+    insertion are executed inside a single ``IMMEDIATE`` transaction in
+    ``evaluate_retraining_policy``.  This prevents duplicate jobs under
+    concurrent requests without introducing a competing transaction layer.
+
+    Returns a :class:`~backend.app.api.schemas.DriftAssessmentResponse` with
+    the drift report and policy outcome.  Never triggers synchronous training or
+    model promotion.
+    """
+    # Load and validate reference data (same caching logic as /monitoring/drift).
+    reference_path = Path(settings.drift_reference_path)
+    cached_path = getattr(api_request.app.state, "drift_reference_path", None)
+    reference = getattr(api_request.app.state, "drift_reference", None)
+
+    if reference is None or cached_path != str(reference_path):
+        try:
+            reference = pd.read_csv(reference_path)
+        except (OSError, ValueError, pd.errors.ParserError, UnicodeDecodeError):
+            logger.exception("drift_reference_load_failed")
+            raise HTTPException(
+                status_code=503,
+                detail="Drift monitoring reference data is unavailable.",
+            ) from None
+
+        try:
+            current_probe = pd.DataFrame(
+                [record.model_dump() for record in request.records]
+            )
+            detect_data_drift(
+                reference,
+                current_probe,
+                min_samples=settings.drift_min_samples,
+                p_value_threshold=settings.drift_p_value_threshold,
+            )
+        except ValueError:
+            logger.exception("drift_reference_validation_failed")
+            raise HTTPException(
+                status_code=503,
+                detail="Drift monitoring reference data is invalid.",
+            ) from None
+
+        api_request.app.state.drift_reference = reference
+        api_request.app.state.drift_reference_path = str(reference_path)
+
+    current = pd.DataFrame([record.model_dump() for record in request.records])
+
+    try:
+        policy_result = evaluate_retraining_policy(
+            reference=reference,
+            current=current,
+            dataset_id=request.dataset_id,
+            trigger_source=request.trigger_source,
+            alert_id=request.alert_id,
+            database_path=settings.lifecycle_audit_db_path,
+        )
+    except ValueError:
+        logger.exception("drift_assess_policy_evaluation_failed")
+        raise HTTPException(
+            status_code=422,
+            detail="Drift assessment could not process the supplied datasets.",
+        ) from None
+    except Exception:
+        logger.exception("drift_assess_internal_error")
+        raise HTTPException(
+            status_code=503,
+            detail="Drift assessment service is temporarily unavailable.",
+        ) from None
+
+    if policy_result["status"] == "active_job_exists":
+        return JSONResponse(
+            status_code=409,
+            content=DriftAssessmentResponse.model_validate(policy_result).model_dump(
+                mode="json"
+            ),
+        )
+
+    return DriftAssessmentResponse.model_validate(policy_result)
 
 
 @app.get(
