@@ -119,6 +119,7 @@ class RetrainingWorker:
         heartbeat_interval_seconds: float | None = None,
         lease_duration_seconds: int | None = None,
         shutdown_timeout: float | None = None,
+        job_timeout_seconds: float | None = None,
     ) -> None:
         self.database_path: Path = resolve_shared_database_path(database_path)
         self.lock_path: Path = resolve_shared_lock_path(lock_path)
@@ -157,6 +158,14 @@ class RetrainingWorker:
         if self.shutdown_timeout < 0:
             raise ValueError("shutdown_timeout must be >= 0.")
 
+        self.job_timeout_seconds: float = (
+            job_timeout_seconds
+            if job_timeout_seconds is not None
+            else getattr(settings, "retraining_job_timeout_seconds", 600.0)
+        )
+        if self.job_timeout_seconds <= 0:
+            raise ValueError("job_timeout_seconds must be > 0.")
+
         self._lock = WorkerLock(self.lock_path)
         self._shutdown_event = threading.Event()
         self._schema_migrated = False
@@ -177,12 +186,12 @@ class RetrainingWorker:
     @property
     def is_executing(self) -> bool:
         """Return True if a job handler or heartbeat thread is currently active."""
-        handler_alive = (
-            self._handler_thread is not None and self._handler_thread.is_alive()
-        )
-        heartbeat_alive = (
-            self._heartbeat_thread is not None and self._heartbeat_thread.is_alive()
-        )
+        if self._handler_thread is not None and not self._handler_thread.is_alive():
+            self._handler_thread = None
+        if self._heartbeat_thread is not None and not self._heartbeat_thread.is_alive():
+            self._heartbeat_thread = None
+        handler_alive = self._handler_thread is not None
+        heartbeat_alive = self._heartbeat_thread is not None
         return handler_alive or heartbeat_alive
 
     def acquire_lock(self) -> int:
@@ -203,12 +212,44 @@ class RetrainingWorker:
                     "current_status": "work_active",
                     "failure_reason": (
                         "Worker execution lock retained because a handler or "
-                        "heartbeat thread is still active."
+                        "heartbeat thread is still active. External forced process "
+                        "termination (SIGKILL) is an emergency action and may require "
+                        "operator reconciliation."
                     ),
                 },
             )
             return
         self._lock.release()
+
+    def wait_for_containment(self, timeout: float | None = None) -> bool:
+        """Wait for active execution threads to terminate during containment.
+
+        Preserves WorkerLock and active lease heartbeats while containment is required.
+        External forced process termination (SIGKILL) is an emergency action and may
+        require operator reconciliation.
+
+        Args:
+            timeout: Optional maximum seconds to wait. None waits indefinitely
+                     until all threads terminate or the process is killed.
+
+        Returns:
+            True if all active execution threads terminated (containment resolved);
+            False if timeout elapsed while threads remain active.
+        """
+        start = time.monotonic()
+        while self.is_executing:
+            if timeout is not None and (time.monotonic() - start) >= timeout:
+                return False
+            # Wait on handler thread without busy looping
+            if self._handler_thread is not None and self._handler_thread.is_alive():
+                self._handler_thread.join(timeout=0.2)
+            elif (
+                self._heartbeat_thread is not None and self._heartbeat_thread.is_alive()
+            ):
+                self._heartbeat_thread.join(timeout=0.1)
+            else:
+                time.sleep(0.05)
+        return True
 
     def stop(self) -> None:
         """Signal worker to stop polling and cooperatively cancel active execution."""
@@ -267,6 +308,13 @@ class RetrainingWorker:
         if not self.is_locked:
             self.acquire_lock()
 
+        if self.is_executing:
+            logger.warning(
+                "refusing_poll_while_handler_active",
+                extra={"worker_id": self.worker_id},
+            )
+            return None
+
         if not self._schema_migrated:
             self._migrate_database_schema()
 
@@ -303,10 +351,14 @@ class RetrainingWorker:
         self._current_context = context
 
         def _heartbeat_loop() -> None:
-            while not stop_heartbeat_event.wait(
-                timeout=self.heartbeat_interval_seconds
-            ):
-                if stop_heartbeat_event.is_set() or self._shutdown_event.is_set():
+            while not stop_heartbeat_event.is_set():
+                deadline = time.monotonic() + self.heartbeat_interval_seconds
+                while time.monotonic() < deadline:
+                    if stop_heartbeat_event.wait(timeout=0.05):
+                        break
+                    if not handler_thread.is_alive():
+                        break
+                if stop_heartbeat_event.is_set() or not handler_thread.is_alive():
                     break
                 try:
                     heartbeat_job(
@@ -364,6 +416,7 @@ class RetrainingWorker:
 
         handler_result: JobExecutionResult | None = None
         handler_exc: BaseException | None = None
+        timed_out = False
 
         def _run_handler() -> None:
             nonlocal handler_result, handler_exc
@@ -390,9 +443,37 @@ class RetrainingWorker:
                     "current_status": "running",
                 },
             )
-            # Wait for handler with graceful shutdown monitoring
+            # Wait for handler with graceful shutdown monitoring and execution timeout
             while handler_thread.is_alive():
                 handler_thread.join(timeout=0.1)
+
+                # 1. Execution timeout check
+                if (
+                    not timed_out
+                    and (time.monotonic() - start_time) >= self.job_timeout_seconds
+                ):
+                    timed_out = True
+                    logger.warning(
+                        "job_execution_timeout_exceeded",
+                        extra={
+                            "worker_id": self.worker_id,
+                            "job_id": job_id,
+                            "lease_attempt": attempt_count,
+                            "execution_duration": time.monotonic() - start_time,
+                            "timeout_seconds": self.job_timeout_seconds,
+                        },
+                    )
+                    cancel_event.set()
+                    # Allow cooperative cancellation grace period up to shutdown_timeout
+                    cancellation_deadline = time.monotonic() + self.shutdown_timeout
+                    while (
+                        handler_thread.is_alive()
+                        and time.monotonic() < cancellation_deadline
+                    ):
+                        handler_thread.join(timeout=0.1)
+                    break
+
+                # 2. Shutdown signal check
                 if self._shutdown_event.is_set():
                     shutdown_deadline = time.monotonic() + self.shutdown_timeout
                     while (
@@ -404,9 +485,11 @@ class RetrainingWorker:
 
             execution_duration = time.monotonic() - start_time
 
-            # If handler is still alive after shutdown timeout, preserve lock
+            # If handler is still alive after cancellation / shutdown timeout:
+            # Preserve lock and keep heartbeating (do not finalize job,
+            # do not release lock)
             if handler_thread.is_alive():
-                logger.warning(
+                logger.critical(
                     "handler_ignored_cancellation_still_running",
                     extra={
                         "worker_id": self.worker_id,
@@ -414,20 +497,155 @@ class RetrainingWorker:
                         "lease_attempt": attempt_count,
                         "execution_duration": execution_duration,
                         "failure_reason": (
-                            "Handler did not terminate within shutdown timeout; "
-                            "lock will remain held."
+                            "Handler did not terminate within cancellation timeout; "
+                            "lock will remain held and job will not be finalized."
                         ),
                     },
                 )
                 return None
 
         finally:
-            stop_heartbeat_event.set()
-            heartbeat_thread.join(timeout=2.0)
-            self._heartbeat_thread = None
             if not handler_thread.is_alive():
+                stop_heartbeat_event.set()
+                heartbeat_thread.join(timeout=2.0)
+                self._heartbeat_thread = None
                 self._handler_thread = None
                 self._current_context = None
+
+        if timed_out:
+            logger.warning(
+                "job_execution_timed_out_terminated",
+                extra={
+                    "worker_id": self.worker_id,
+                    "job_id": job_id,
+                    "lease_attempt": attempt_count,
+                    "execution_duration": execution_duration,
+                    "timeout_seconds": self.job_timeout_seconds,
+                },
+            )
+            # Revalidate lease ownership before updating state
+            try:
+                validate_job_ownership(
+                    self.database_path,
+                    job_id=job_id,
+                    worker_id=self.worker_id,
+                    lease_token=lease_token,
+                )
+            except (JobOwnershipError, JobNotFoundError, StaleLeaseError) as own_exc:
+                logger.warning(
+                    "lease_validation_failed_after_timeout",
+                    extra={
+                        "worker_id": self.worker_id,
+                        "job_id": job_id,
+                        "lease_attempt": attempt_count,
+                        "execution_duration": execution_duration,
+                        "failure_reason": str(own_exc),
+                    },
+                )
+                return None
+
+            job_record = get_job(self.database_path, job_id=job_id)
+            if job_record is None:
+                return None
+
+            # Case 1: Post-promotion timeout -> Quarantine into reconciliation_required
+            if job_record.get("promotion_started_at") is not None:
+                fail_reason = (
+                    f"Job execution timed out after {execution_duration:.1f}s "
+                    f"(timeout={self.job_timeout_seconds}s) after promotion started."
+                )
+                try:
+                    return transition_job_status(
+                        self.database_path,
+                        job_id=job_id,
+                        worker_id=self.worker_id,
+                        lease_token=lease_token,
+                        target_status="reconciliation_required",
+                        failure_reason=fail_reason,
+                    )
+                except JobOwnershipError as own_exc:
+                    logger.warning(
+                        "fenced_quarantine_transition_rejected_ownership_lost",
+                        extra={
+                            "worker_id": self.worker_id,
+                            "job_id": job_id,
+                            "lease_attempt": attempt_count,
+                            "execution_duration": execution_duration,
+                            "failure_reason": str(own_exc),
+                        },
+                    )
+                    return None
+
+            # Case 2: Pre-promotion timeout with attempts remaining -> Requeue for retry
+            curr_attempts = job_record.get("attempt_count", attempt_count)
+            max_attempts = job_record.get("max_attempts", 3)
+
+            if curr_attempts < max_attempts:
+                fail_reason = (
+                    f"Job execution timed out after {execution_duration:.1f}s "
+                    f"(timeout={self.job_timeout_seconds}s) on attempt "
+                    f"{curr_attempts}/{max_attempts}."
+                )
+                try:
+                    requeued = requeue_job_for_retry(
+                        self.database_path,
+                        job_id=job_id,
+                        worker_id=self.worker_id,
+                        lease_token=lease_token,
+                        failure_reason=fail_reason,
+                    )
+                    logger.warning(
+                        "job_requeued_after_timeout",
+                        extra={
+                            "worker_id": self.worker_id,
+                            "job_id": job_id,
+                            "lease_attempt": curr_attempts,
+                            "current_status": "queued",
+                            "execution_duration": execution_duration,
+                            "failure_reason": fail_reason,
+                        },
+                    )
+                    return requeued
+                except JobOwnershipError as own_exc:
+                    logger.warning(
+                        "fenced_requeue_rejected_ownership_lost",
+                        extra={
+                            "worker_id": self.worker_id,
+                            "job_id": job_id,
+                            "lease_attempt": curr_attempts,
+                            "execution_duration": execution_duration,
+                            "failure_reason": str(own_exc),
+                        },
+                    )
+                    return None
+
+            # Case 3: Pre-promotion timeout with attempts exhausted -> Terminal failed
+            fail_reason = (
+                f"Job execution timed out after {execution_duration:.1f}s "
+                f"(timeout={self.job_timeout_seconds}s) with attempts exhausted "
+                f"({curr_attempts}/{max_attempts})."
+            )
+            try:
+                return transition_job_status(
+                    self.database_path,
+                    job_id=job_id,
+                    worker_id=self.worker_id,
+                    lease_token=lease_token,
+                    target_status="failed",
+                    failure_reason=fail_reason,
+                )
+            except JobOwnershipError as own_exc:
+                logger.warning(
+                    "fenced_failure_transition_rejected_ownership_lost",
+                    extra={
+                        "worker_id": self.worker_id,
+                        "job_id": job_id,
+                        "lease_attempt": curr_attempts,
+                        "execution_duration": execution_duration,
+                        "failure_reason": str(own_exc),
+                    },
+                )
+                return None
 
         # Check for unexpected exception in handler
         if handler_exc is not None:
@@ -442,20 +660,6 @@ class RetrainingWorker:
                 },
                 exc_info=handler_exc,
             )
-
-            # If cancelled due to lease loss, never mark failed or overwrite state
-            if cancel_event.is_set():
-                logger.warning(
-                    "job_failed_after_ownership_lost_not_updating_state",
-                    extra={
-                        "worker_id": self.worker_id,
-                        "job_id": job_id,
-                        "lease_attempt": attempt_count,
-                        "execution_duration": execution_duration,
-                        "failure_reason": "Ownership lost; not updating state",
-                    },
-                )
-                return None
 
             # Verify current lease ownership before updating DB
             try:
@@ -674,6 +878,14 @@ class RetrainingWorker:
                 extra={"worker_id": self.worker_id, "lock_path": str(self.lock_path)},
             )
             while not self._shutdown_event.is_set():
+                if self.is_executing:
+                    logger.warning(
+                        "worker_blocked_handler_still_active",
+                        extra={"worker_id": self.worker_id},
+                    )
+                    if self._shutdown_event.wait(timeout=self.poll_interval_seconds):
+                        break
+                    continue
                 try:
                     self.run_once()
                 except Exception as exc:
@@ -686,6 +898,27 @@ class RetrainingWorker:
                     )
                 if self._shutdown_event.wait(timeout=self.poll_interval_seconds):
                     break
+
+            # If shutdown was signaled while execution is still active:
+            # We MUST NOT exit run() or release WorkerLock while a handler capable
+            # of mutating MLflow is alive. Enter containment to retain WorkerLock
+            # and active heartbeats until the handler terminates or an external
+            # supervisor terminates the process (e.g. SIGKILL).
+            if self.is_executing:
+                logger.critical(
+                    "worker_shutdown_containment_active",
+                    extra={
+                        "worker_id": self.worker_id,
+                        "failure_reason": (
+                            "Shutdown received but handler or heartbeat thread is "
+                            "still executing. Retaining WorkerLock and lease "
+                            "heartbeats. External forced process termination (e.g. "
+                            "SIGKILL) is an emergency action and may require "
+                            "operator reconciliation."
+                        ),
+                    },
+                )
+                self.wait_for_containment()
         finally:
             self.release_lock()
             logger.info("worker_stopped", extra={"worker_id": self.worker_id})
@@ -721,6 +954,12 @@ def main(argv: list[str] | None = None) -> int:
         help="Graceful shutdown timeout in seconds",
     )
     parser.add_argument(
+        "--job-timeout",
+        type=float,
+        default=None,
+        help="Job execution timeout in seconds",
+    )
+    parser.add_argument(
         "--once",
         action="store_true",
         help="Execute a single polling iteration and exit",
@@ -728,7 +967,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--handler",
         choices=["noop", "production"],
-        default="noop",
+        required=True,
         help="Job handler to use ('noop' or 'production')",
     )
     args = parser.parse_args(argv)
@@ -750,14 +989,37 @@ def main(argv: list[str] | None = None) -> int:
         heartbeat_interval_seconds=args.heartbeat_interval,
         lease_duration_seconds=args.lease_duration,
         shutdown_timeout=args.shutdown_timeout,
+        job_timeout_seconds=args.job_timeout,
     )
 
     try:
         if args.once:
             with worker:
                 worker.run_once()
+                if worker.is_executing:
+                    logger.critical(
+                        "worker_once_containment_active",
+                        extra={
+                            "worker_id": worker.worker_id,
+                            "failure_reason": (
+                                "Single iteration finished but handler is still "
+                                "executing. Retaining lock and heartbeats. External "
+                                "forced process termination is an emergency action."
+                            ),
+                        },
+                    )
+                    worker.wait_for_containment()
         else:
             worker.run()
+
+        # Never return successful shutdown (0) while a handler capable of
+        # mutating MLflow is alive
+        if worker.is_executing:
+            logger.critical(
+                "worker_exit_refused_handler_alive",
+                extra={"worker_id": worker.worker_id},
+            )
+            return 1
         return 0
     except WorkerLockConflictError as exc:
         logger.error(
