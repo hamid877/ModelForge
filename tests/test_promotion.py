@@ -1,3 +1,4 @@
+from pathlib import Path
 from unittest.mock import patch
 
 import numpy as np
@@ -6,6 +7,7 @@ import pytest
 from mlflow.exceptions import MlflowException
 from mlflow.protos.databricks_pb2 import ErrorCode
 
+from backend.app.config import settings
 from backend.app.ml.promotion import (
     BenchmarkDataset,
     check_training_benchmark_overlap,
@@ -15,6 +17,15 @@ from backend.app.ml.promotion import (
     promote_model,
     validate_benchmark_data,
 )
+
+
+@pytest.fixture(autouse=True)
+def isolate_promotion_audit_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Ensure all promote_model audit calls use an isolated temporary database."""
+    test_db = tmp_path / "promotion_audit.db"
+    monkeypatch.setattr(settings, "promotion_audit_db_path", str(test_db))
+    monkeypatch.setattr(settings, "lifecycle_audit_db_path", str(test_db))
+    return test_db
 
 
 @pytest.fixture

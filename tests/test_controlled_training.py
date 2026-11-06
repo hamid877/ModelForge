@@ -12,6 +12,7 @@ import pytest
 from mlflow.exceptions import MlflowException
 from mlflow.protos.databricks_pb2 import ErrorCode
 
+from backend.app.config import settings
 from backend.app.ml.audit import (
     AuditDatabaseError,
     get_promotion_audit_by_job_id,
@@ -37,6 +38,19 @@ from backend.app.ml.worker import (
     RetrainingWorker,
     main,
 )
+
+
+@pytest.fixture(autouse=True)
+def isolate_controlled_training_settings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> Path:
+    """Ensure controlled training tests are isolated from production database."""
+    isolated_db = tmp_path / "isolated_controlled_training.db"
+    isolated_lock = tmp_path / "isolated_controlled_training.lock"
+    monkeypatch.setattr(settings, "lifecycle_audit_db_path", str(isolated_db))
+    monkeypatch.setattr(settings, "promotion_audit_db_path", str(isolated_db))
+    monkeypatch.setattr(settings, "worker_lock_path", str(isolated_lock))
+    return isolated_db
 
 
 @pytest.fixture
@@ -1722,3 +1736,189 @@ def test_case5_lease_expiry_during_promotion_stale_worker_and_recovery(
         InvalidStateTransitionError, match="promotion has already started"
     ):
         reclaim_expired_job(migrated_db, job_id=jid)
+
+
+def test_persistent_database_not_selected_by_tests(tmp_path: Path):
+    """Safeguard: verify that test execution never writes to persistent DB."""
+    from backend.app.ml.db import PROJECT_ROOT
+
+    persistent_db = PROJECT_ROOT / "data" / "lifecycle_audit.db"
+    initial_mtime = persistent_db.stat().st_mtime if persistent_db.exists() else None
+    initial_size = persistent_db.stat().st_size if persistent_db.exists() else None
+
+    # Perform operations without explicit db_path to verify isolation redirects
+    # to tmp_path
+    test_record = {
+        "job_id": "safeguard-job",
+        "model_name": "churn-classifier",
+        "candidate_version": "1",
+        "candidate_run_id": "run-test",
+        "champion_version": None,
+        "approved": True,
+        "reason": "gate_passed",
+        "candidate_f1": 0.85,
+        "champion_f1": None,
+        "benchmark_version": "v1",
+        "benchmark_digest": "a" * 64,
+        "margin": 0.01,
+    }
+    meta = record_promotion_audit(test_record)
+    assert meta["audit_id"]
+
+    if persistent_db.exists():
+        assert persistent_db.stat().st_mtime == initial_mtime
+        assert persistent_db.stat().st_size == initial_size
+
+
+def test_cancellation_immediately_before_marker_prevents_promotion(
+    migrated_db: Path,
+    training_csv_path: Path,
+    sample_benchmark_df: pd.DataFrame,
+    tmp_path: Path,
+) -> None:
+    """Cancellation right before marker commitment aborts promotion and requeues."""
+    job = create_queued_job(
+        migrated_db,
+        dataset_id=str(training_csv_path),
+        trigger_source="manual",
+        max_attempts=3,
+    )
+    jid = job["job_id"]
+
+    mock_client = MockMlflowClient(champion_version="1")
+    model_info = type(
+        "ModelInfoStub",
+        (),
+        {"registered_model_version": "2"},
+    )()
+
+    handler = ControlledTrainingJobHandler(
+        database_path=migrated_db,
+        model_path=tmp_path / "cand_cancel.joblib",
+        benchmark_df=sample_benchmark_df,
+        data_path=training_csv_path,
+        mlflow_client=mock_client,
+    )
+
+    worker = RetrainingWorker(
+        database_path=migrated_db,
+        lock_path=tmp_path / "cancel_before.lock",
+        worker_id="test-worker-cancel",
+        handler=handler,
+    )
+
+    def cancel_on_log_model(*args, **kwargs):
+        # Cancel right before candidate callback persistence runs
+        assert worker._current_context is not None
+        worker._current_context.cancel_event.set()
+        return model_info
+
+    with (
+        patch("backend.app.ml.workflow.setup_mlflow"),
+        patch(
+            "backend.app.ml.workflow.mlflow.start_run",
+            return_value=nullcontext(),
+        ),
+        patch("backend.app.ml.workflow.mlflow.set_tag"),
+        patch("backend.app.ml.workflow.mlflow.log_param"),
+        patch("backend.app.ml.workflow.mlflow.log_metric"),
+        patch("backend.app.ml.workflow.mlflow.log_artifact"),
+        patch(
+            "backend.app.ml.workflow.mlflow.sklearn.log_model",
+            side_effect=cancel_on_log_model,
+        ),
+        patch("backend.app.ml.workflow.promote_model") as mock_promote,
+        worker,
+    ):
+        worker.run_once()
+
+    # Promotion was strictly fenced out
+    mock_promote.assert_not_called()
+
+    # Pre-marker invariant: marker was never persisted
+    persisted = get_job(migrated_db, job_id=jid)
+    assert persisted["promotion_started_at"] is None
+
+    # Pre-marker timeout/cancel handling: requeued for retry (attempts < max_attempts)
+    # Never quarantined into reconciliation_required
+    assert persisted["status"] in ("queued", "failed")
+    assert persisted["status"] != "reconciliation_required"
+
+
+def test_cancellation_immediately_after_marker_quarantines_without_retry(
+    migrated_db: Path,
+    training_csv_path: Path,
+    sample_benchmark_df: pd.DataFrame,
+    tmp_path: Path,
+) -> None:
+    """Cancellation or failure after marker commitment quarantines without retry."""
+    job = create_queued_job(
+        migrated_db,
+        dataset_id=str(training_csv_path),
+        trigger_source="manual",
+        max_attempts=3,
+    )
+    jid = job["job_id"]
+
+    mock_client = MockMlflowClient(champion_version=None)
+    model_info = type(
+        "ModelInfoStub",
+        (),
+        {"registered_model_version": "1"},
+    )()
+
+    handler = ControlledTrainingJobHandler(
+        database_path=migrated_db,
+        model_path=tmp_path / "cand_post_cancel.joblib",
+        benchmark_df=sample_benchmark_df,
+        data_path=training_csv_path,
+        mlflow_client=mock_client,
+    )
+
+    worker = RetrainingWorker(
+        database_path=migrated_db,
+        lock_path=tmp_path / "cancel_after.lock",
+        worker_id="test-worker-post-cancel",
+        handler=handler,
+    )
+
+    def fail_during_promote(*args, **kwargs):
+        # Simulate cancellation and failure right after marker was committed
+        assert worker._current_context is not None
+        worker._current_context.cancel_event.set()
+        raise RuntimeError("MLflow timed out or process cancelled during promotion")
+
+    with (
+        patch("backend.app.ml.workflow.setup_mlflow"),
+        patch(
+            "backend.app.ml.workflow.mlflow.start_run",
+            return_value=nullcontext(),
+        ),
+        patch("backend.app.ml.workflow.mlflow.set_tag"),
+        patch("backend.app.ml.workflow.mlflow.log_param"),
+        patch("backend.app.ml.workflow.mlflow.log_metric"),
+        patch("backend.app.ml.workflow.mlflow.log_artifact"),
+        patch(
+            "backend.app.ml.workflow.mlflow.sklearn.log_model",
+            return_value=model_info,
+        ),
+        patch(
+            "backend.app.ml.workflow.promote_model",
+            side_effect=fail_during_promote,
+        ),
+        worker,
+    ):
+        result = worker.run_once()
+
+    # Post-marker invariant: marker was durably committed
+    persisted = get_job(migrated_db, job_id=jid)
+    assert persisted["promotion_started_at"] is not None
+
+    # Post-marker outcome: strictly quarantined into reconciliation_required
+    assert result is not None
+    assert result["status"] == "reconciliation_required"
+    assert persisted["status"] == "reconciliation_required"
+    assert persisted["is_active"] == 1
+
+    # Invariant: no automatic retry
+    assert persisted["attempt_count"] == 1

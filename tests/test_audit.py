@@ -3,7 +3,17 @@ import sqlite3
 
 import pytest
 
+from backend.app.config import settings
 from backend.app.ml.audit import AuditDatabaseError, record_lifecycle_run
+
+
+@pytest.fixture(autouse=True)
+def isolate_audit_settings(tmp_path, monkeypatch):
+    """Ensure all audit tests use isolated temporary databases."""
+    test_db = tmp_path / "isolated_audit_default.db"
+    monkeypatch.setattr(settings, "lifecycle_audit_db_path", str(test_db))
+    monkeypatch.setattr(settings, "promotion_audit_db_path", str(test_db))
+    return test_db
 
 
 def test_record_lifecycle_run_persists_payload(tmp_path):

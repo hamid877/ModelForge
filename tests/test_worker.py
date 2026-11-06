@@ -11,6 +11,7 @@ from unittest.mock import patch
 
 import pytest
 
+from backend.app.config import settings
 from backend.app.ml.jobs import (
     claim_queued_job,
     create_queued_job,
@@ -25,6 +26,17 @@ from backend.app.ml.worker import (
     RetrainingWorker,
     main,
 )
+
+
+@pytest.fixture(autouse=True)
+def isolate_worker_settings(tmp_path, monkeypatch):
+    """Ensure worker tests are isolated from default database and lock files."""
+    isolated_db = tmp_path / "isolated_worker_default.db"
+    isolated_lock = tmp_path / "isolated_worker_default.lock"
+    monkeypatch.setattr(settings, "lifecycle_audit_db_path", str(isolated_db))
+    monkeypatch.setattr(settings, "promotion_audit_db_path", str(isolated_db))
+    monkeypatch.setattr(settings, "worker_lock_path", str(isolated_lock))
+    return isolated_db
 
 
 @pytest.fixture
@@ -60,6 +72,12 @@ def test_worker_initialization_and_validation(tmp_path):
 
     with pytest.raises(ValueError, match="lease_duration_seconds must be >= 1"):
         RetrainingWorker(lease_duration_seconds=0)
+
+    with pytest.raises(ValueError, match="job_timeout_seconds must be > 0"):
+        RetrainingWorker(job_timeout_seconds=0)
+
+    with pytest.raises(ValueError, match="job_timeout_seconds must be > 0"):
+        RetrainingWorker(job_timeout_seconds=-10.0)
 
 
 def test_worker_startup_and_exclusive_lock_acquisition(tmp_path):
@@ -392,10 +410,9 @@ def test_handler_deliberately_ignoring_cancellation_preserves_lock(
 
     # Signal shutdown with timeout that expires before handler exits
     worker.stop()
-    worker_thread.join(timeout=2.0)
 
-    # Worker polling thread stopped, but handler is still alive in background
-    assert not worker_thread.is_alive()
+    # Worker remains alive in containment, retaining lock and heartbeats
+    assert worker_thread.is_alive()
     assert worker.is_executing
     assert worker.is_locked
 
@@ -412,9 +429,8 @@ def test_handler_deliberately_ignoring_cancellation_preserves_lock(
 
     # Allow stubborn handler to exit cleanly
     allow_handler_exit.set()
-    deadline = time.time() + 2.0
-    while worker.is_executing and time.time() < deadline:
-        time.sleep(0.05)
+    worker_thread.join(timeout=3.0)
+    assert not worker_thread.is_alive()
     assert not worker.is_executing
 
     # Now release_lock() succeeds and frees the lock
@@ -778,6 +794,8 @@ def test_worker_main_cli_entry_point(migrated_db, tmp_path):
             str(lock_file),
             "--worker-id",
             "cli-w1",
+            "--handler",
+            "noop",
             "--once",
         ]
     )
@@ -793,6 +811,8 @@ def test_worker_main_cli_entry_point(migrated_db, tmp_path):
                 str(lock_file),
                 "--worker-id",
                 "cli-w2",
+                "--handler",
+                "noop",
                 "--once",
             ]
         )
@@ -927,7 +947,15 @@ def test_worker_main_once_flag_initializes_schema(tmp_path):
     assert not db_path.exists()
 
     exit_code = main(
-        ["--db-path", str(db_path), "--lock-path", str(lock_file), "--once"]
+        [
+            "--db-path",
+            str(db_path),
+            "--lock-path",
+            str(lock_file),
+            "--handler",
+            "noop",
+            "--once",
+        ]
     )
     assert exit_code == 0
     assert db_path.exists()
@@ -936,3 +964,499 @@ def test_worker_main_once_flag_initializes_schema(tmp_path):
         cursor = conn.execute("SELECT name FROM sqlite_master WHERE type='table';")
         tables = {row[0] for row in cursor.fetchall()}
         assert "retraining_jobs" in tables
+
+
+def test_worker_main_cli_requires_handler(migrated_db, tmp_path):
+    """Worker CLI rejects invocation when --handler is omitted."""
+    lock_file = tmp_path / "cli_no_handler.lock"
+    with pytest.raises(SystemExit) as exc_info:
+        main(
+            [
+                "--db-path",
+                migrated_db,
+                "--lock-path",
+                str(lock_file),
+                "--once",
+            ]
+        )
+    assert exc_info.value.code == 2
+
+
+def test_worker_execution_timeout_pre_marker_requeues_when_attempts_remain(
+    migrated_db, tmp_path
+):
+    """Execution timeout before promotion marker requeues job when attempts remain."""
+    job = create_queued_job(
+        migrated_db,
+        dataset_id="ds-timeout-1",
+        trigger_source="manual",
+        max_attempts=3,
+    )
+    jid = job["job_id"]
+
+    cancelled_detected = threading.Event()
+
+    def slow_handler(j, ctx):
+        while not ctx.is_cancelled:
+            time.sleep(0.01)
+        cancelled_detected.set()
+        raise RuntimeError("Cancelled by timeout")
+
+    worker = RetrainingWorker(
+        database_path=migrated_db,
+        lock_path=tmp_path / "timeout1.lock",
+        worker_id="w-timeout-1",
+        handler=slow_handler,
+        job_timeout_seconds=0.1,
+        shutdown_timeout=1.0,
+    )
+
+    with worker:
+        requeued = worker.run_once()
+
+    assert cancelled_detected.is_set()
+    assert requeued is not None
+    assert requeued["status"] == "queued"
+    assert requeued["attempt_count"] == 1
+    assert "Job execution timed out" in requeued["failure_reason"]
+
+    persisted = get_job(migrated_db, job_id=jid)
+    assert persisted["status"] == "queued"
+    assert persisted["is_active"] == 1
+
+
+def test_worker_execution_timeout_pre_marker_fails_when_attempts_exhausted(
+    migrated_db, tmp_path
+):
+    """Execution timeout before promotion marker fails job when max attempts reached."""
+    # Pre-set attempt_count so this run reaches max_attempts
+    job = create_queued_job(
+        migrated_db,
+        dataset_id="ds-timeout-2",
+        trigger_source="manual",
+        max_attempts=2,
+    )
+    jid = job["job_id"]
+
+    # First attempt fails to reach attempt 1
+    with sqlite3.connect(migrated_db) as conn:
+        conn.execute(
+            "UPDATE retraining_jobs SET attempt_count = 1 WHERE job_id = ?",
+            (jid,),
+        )
+
+    cancelled_detected = threading.Event()
+
+    def slow_handler(j, ctx):
+        while not ctx.is_cancelled:
+            time.sleep(0.01)
+        cancelled_detected.set()
+        raise RuntimeError("Cancelled by timeout")
+
+    worker = RetrainingWorker(
+        database_path=migrated_db,
+        lock_path=tmp_path / "timeout2.lock",
+        worker_id="w-timeout-2",
+        handler=slow_handler,
+        job_timeout_seconds=0.1,
+        shutdown_timeout=1.0,
+    )
+
+    with worker:
+        failed = worker.run_once()
+
+    assert cancelled_detected.is_set()
+    assert failed is not None
+    assert failed["status"] == "failed"
+    assert failed["is_active"] is None
+    assert "attempts exhausted" in failed["failure_reason"]
+
+    persisted = get_job(migrated_db, job_id=jid)
+    assert persisted["status"] == "failed"
+    assert persisted["is_active"] is None
+
+
+def test_worker_execution_timeout_post_marker_quarantines(migrated_db, tmp_path):
+    """Timeout after promotion_started_at commits quarantines job."""
+    job = create_queued_job(
+        migrated_db,
+        dataset_id="ds-timeout-3",
+        trigger_source="manual",
+        max_attempts=3,
+    )
+    jid = job["job_id"]
+
+    cancelled_detected = threading.Event()
+
+    def post_marker_handler(j, ctx):
+        mark_promotion_started(
+            migrated_db,
+            job_id=jid,
+            worker_id=ctx.worker_id,
+            lease_token=ctx.lease_token,
+            candidate_version="5",
+        )
+        while not ctx.is_cancelled:
+            time.sleep(0.01)
+        cancelled_detected.set()
+        raise RuntimeError("Cancelled by timeout after promotion marker")
+
+    worker = RetrainingWorker(
+        database_path=migrated_db,
+        lock_path=tmp_path / "timeout3.lock",
+        worker_id="w-timeout-3",
+        handler=post_marker_handler,
+        job_timeout_seconds=0.1,
+        shutdown_timeout=1.0,
+    )
+
+    with worker:
+        quarantined = worker.run_once()
+
+    assert cancelled_detected.is_set()
+    assert quarantined is not None
+    assert quarantined["status"] == "reconciliation_required"
+    assert quarantined["is_active"] == 1
+    assert "after promotion started" in quarantined["failure_reason"]
+
+    # Invariants: no automatic retry
+    persisted = get_job(migrated_db, job_id=jid)
+    assert persisted["status"] == "reconciliation_required"
+    assert persisted["attempt_count"] == 1
+
+
+def test_worker_execution_timeout_handler_ignoring_cancellation_preserves_lock(
+    migrated_db, tmp_path
+):
+    """Handler ignoring cancellation preserves lock and avoids DB mutation."""
+    job = create_queued_job(
+        migrated_db,
+        dataset_id="ds-timeout-ignore",
+        trigger_source="manual",
+    )
+    jid = job["job_id"]
+
+    hang_event = threading.Event()
+
+    def ignoring_handler(j, ctx):
+        hang_event.wait(timeout=2.0)
+        return JobExecutionResult(status="succeeded")
+
+    worker = RetrainingWorker(
+        database_path=migrated_db,
+        lock_path=tmp_path / "timeout_ignore.lock",
+        worker_id="w-ignore-1",
+        handler=ignoring_handler,
+        job_timeout_seconds=0.1,
+        shutdown_timeout=0.1,
+    )
+
+    worker.acquire_lock()
+    try:
+        # Single iteration: timeout will trigger, handler will ignore it
+        result = worker.run_once()
+        # Worker returns None because handler is still alive
+        assert result is None
+        assert worker.is_executing is True
+        assert worker.is_locked is True
+
+        # Database state was NOT mutated to failed or requeued!
+        db_job = get_job(migrated_db, job_id=jid)
+        assert db_job["status"] == "running"
+        assert db_job["is_active"] == 1
+
+        # WorkerLock cannot be released while work is active
+        worker.release_lock()
+        assert worker.is_locked is True
+
+        # Worker refuses subsequent poll cycles while handler is active
+        subsequent = worker.run_once()
+        assert subsequent is None
+    finally:
+        hang_event.set()
+        time.sleep(0.1)
+        worker.release_lock(force=True)
+
+
+def test_worker_execution_timeout_heartbeat_preserved_while_ignoring_cancellation(
+    migrated_db, tmp_path
+):
+    """Heartbeat loop continues extending lease while handler is active."""
+    job = create_queued_job(
+        migrated_db,
+        dataset_id="ds-timeout-hb",
+        trigger_source="manual",
+    )
+    jid = job["job_id"]
+
+    hang_event = threading.Event()
+
+    def hanging_handler(j, ctx):
+        hang_event.wait(timeout=0.8)
+        return JobExecutionResult(status="succeeded")
+
+    worker = RetrainingWorker(
+        database_path=migrated_db,
+        lock_path=tmp_path / "timeout_hb.lock",
+        worker_id="w-hb-1",
+        handler=hanging_handler,
+        heartbeat_interval_seconds=0.05,
+        job_timeout_seconds=0.1,
+        shutdown_timeout=0.05,
+        lease_duration_seconds=5,
+    )
+
+    worker.acquire_lock()
+    try:
+        worker.run_once()
+        # While handler is hanging past timeout, heartbeat continues
+        time.sleep(0.15)
+        job_after = get_job(migrated_db, job_id=jid)
+        assert job_after is not None
+        assert job_after["heartbeat_at"] is not None
+        assert job_after["status"] == "running"
+    finally:
+        hang_event.set()
+        time.sleep(0.1)
+        worker.release_lock(force=True)
+
+
+def test_worker_execution_timeout_shutdown_interaction(migrated_db, tmp_path):
+    """Worker receives shutdown signal during timeout and cancels cleanly."""
+    create_queued_job(
+        migrated_db,
+        dataset_id="ds-timeout-shutdown",
+        trigger_source="manual",
+    )
+
+    cancelled_event = threading.Event()
+
+    def slow_handler(j, ctx):
+        while not ctx.is_cancelled:
+            time.sleep(0.01)
+        cancelled_event.set()
+        raise RuntimeError("Cancelled")
+
+    worker = RetrainingWorker(
+        database_path=migrated_db,
+        lock_path=tmp_path / "timeout_shutdown.lock",
+        worker_id="w-shutdown-1",
+        handler=slow_handler,
+        job_timeout_seconds=0.1,
+        shutdown_timeout=0.5,
+    )
+
+    worker.acquire_lock()
+    try:
+        # Simulate simultaneous shutdown signal
+        worker.stop()
+        worker.process_job(claim_queued_job(migrated_db, worker_id=worker.worker_id))
+        assert cancelled_event.is_set()
+    finally:
+        worker.release_lock()
+    assert not worker.is_locked
+
+
+def test_worker_sigterm_uncooperative_handler_containment_and_lock_retention(
+    migrated_db, tmp_path
+):
+    """Worker in containment retains lock and heartbeats without state overwrite."""
+    job = create_queued_job(
+        migrated_db,
+        dataset_id="ds-uncoop-contain",
+        trigger_source="manual",
+    )
+    jid = job["job_id"]
+
+    hang_event = threading.Event()
+
+    def uncooperative_handler(j, ctx):
+        hang_event.wait(timeout=2.0)
+        return JobExecutionResult(status="succeeded")
+
+    lock_file = tmp_path / "uncoop_contain.lock"
+    worker = RetrainingWorker(
+        database_path=migrated_db,
+        lock_path=lock_file,
+        worker_id="w-uncoop-1",
+        handler=uncooperative_handler,
+        heartbeat_interval_seconds=0.05,
+        shutdown_timeout=0.05,
+        job_timeout_seconds=0.1,
+        lease_duration_seconds=5,
+    )
+
+    worker.acquire_lock()
+    try:
+        # Worker claims job and starts handler
+        worker.run_once()
+
+        # Simulate SIGTERM / shutdown signal while handler is alive
+        worker.stop()
+
+        # Verify containment properties while handler is alive:
+        assert worker.is_executing is True
+        assert worker.is_locked is True
+
+        # 1. release_lock() refuses to release
+        worker.release_lock()
+        assert worker.is_locked is True
+
+        # 2. Conflicting worker cannot acquire the held lock
+        w_other = RetrainingWorker(
+            database_path=migrated_db,
+            lock_path=lock_file,
+            worker_id="w-other",
+        )
+        with pytest.raises(WorkerLockConflictError):
+            w_other.acquire_lock()
+
+        # 3. SQLite job remains running with active lease (never failed/requeued)
+        db_job = get_job(migrated_db, job_id=jid)
+        assert db_job["status"] == "running"
+        assert db_job["is_active"] == 1
+        hb1 = db_job["heartbeat_at"]
+
+        # 4. Heartbeat loop continues extending the lease in containment
+        time.sleep(0.12)
+        db_job2 = get_job(migrated_db, job_id=jid)
+        assert db_job2["status"] == "running"
+        assert db_job2["heartbeat_at"] is not None
+        assert db_job2["heartbeat_at"] > hb1
+
+        # 5. wait_for_containment with bounded timeout returns False while handler alive
+        assert worker.wait_for_containment(timeout=0.05) is False
+
+        # Now allow uncooperative handler to finish
+        hang_event.set()
+
+        # Containment resolves once handler terminates
+        assert worker.wait_for_containment(timeout=2.0) is True
+        assert worker.is_executing is False
+
+        # Lock can now be released normally
+        worker.release_lock()
+        assert worker.is_locked is False
+    finally:
+        hang_event.set()
+        time.sleep(0.05)
+        worker.release_lock(force=True)
+
+
+def test_subprocess_sigterm_uncooperative_handler_does_not_exit_zero(tmp_path):
+    """Subprocess running worker does not exit 0 while handler is alive."""
+    lock_file = tmp_path / "subproc_uncoop.lock"
+    db_file = tmp_path / "subproc_uncoop.db"
+    started_file = tmp_path / "started.txt"
+    unblock_file = tmp_path / "unblock.txt"
+
+    migrate_audit_database_idempotent(db_file)
+    create_queued_job(
+        db_file,
+        dataset_id="ds-subproc-uncoop",
+        trigger_source="manual",
+    )
+
+    code = f"""
+import sys, time
+from pathlib import Path
+from backend.app.ml.worker import RetrainingWorker, JobExecutionResult
+
+def stubborn_handler(job, ctx):
+    Path(r'{started_file}').write_text("running")
+    deadline = time.time() + 3.0
+    while not Path(r'{unblock_file}').exists() and time.time() < deadline:
+        time.sleep(0.05)
+    return JobExecutionResult(status="succeeded")
+
+worker = RetrainingWorker(
+    database_path=r'{db_file}',
+    lock_path=r'{lock_file}',
+    handler=stubborn_handler,
+    poll_interval_seconds=0.1,
+    shutdown_timeout=0.1,
+    job_timeout_seconds=5.0,
+    heartbeat_interval_seconds=0.05,
+)
+worker.run()
+"""
+    proc = subprocess.Popen([sys.executable, "-c", code])
+    try:
+        # Wait for handler to start executing
+        deadline = time.time() + 5.0
+        while not started_file.exists() and time.time() < deadline:
+            time.sleep(0.05)
+        assert started_file.exists()
+
+        # Send SIGTERM to the worker subprocess while handler is running
+        proc.send_signal(signal.SIGTERM)
+
+        # Allow time for shutdown_timeout to elapse
+        time.sleep(0.4)
+
+        # Process MUST NOT have exited 0 while the handler is alive!
+        assert proc.poll() is None
+
+        # Lock must remain held by the subprocess
+        w_other = RetrainingWorker(database_path=db_file, lock_path=lock_file)
+        with pytest.raises(WorkerLockConflictError):
+            w_other.acquire_lock()
+
+        # Now signal the stubborn handler to finish
+        unblock_file.write_text("done")
+
+        # Subprocess should now resolve containment and exit 0 cleanly
+        exit_code = proc.wait(timeout=5.0)
+        assert exit_code == 0
+
+        # After clean exit, lock is released
+        w_other.acquire_lock()
+        assert w_other.is_locked
+        w_other.release_lock()
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+
+
+def test_worker_main_returns_nonzero_when_handler_remains_executing(tmp_path):
+    """main() returns 1 (never 0) if execution threads remain active after timeout."""
+    db_file = tmp_path / "main_contain.db"
+    lock_file = tmp_path / "main_contain.lock"
+    migrate_audit_database_idempotent(db_file)
+    create_queued_job(
+        db_file,
+        dataset_id="ds-main-contain",
+        trigger_source="manual",
+    )
+
+    hang_event = threading.Event()
+
+    def hanging_handler(job, ctx):
+        hang_event.wait(timeout=2.0)
+        return JobExecutionResult(status="succeeded")
+
+    with patch(
+        "backend.app.ml.training_handler.ControlledTrainingJobHandler",
+        return_value=hanging_handler,
+    ):
+        # Mock wait_for_containment to simulate timeout elapsed while thread alive
+        with patch.object(RetrainingWorker, "wait_for_containment", return_value=False):
+            code = main(
+                [
+                    "--db-path",
+                    str(db_file),
+                    "--lock-path",
+                    str(lock_file),
+                    "--handler",
+                    "production",
+                    "--once",
+                    "--job-timeout",
+                    "0.05",
+                    "--shutdown-timeout",
+                    "0.05",
+                ]
+            )
+            # Must return non-zero exit code (1), never 0!
+            assert code == 1
+
+    hang_event.set()

@@ -1,10 +1,21 @@
+from pathlib import Path
 from unittest.mock import patch
 
 import pandas as pd
 import pytest
 
+from backend.app.config import settings
 from backend.app.ml.lifecycle import run_drift_aware_lifecycle
 from backend.app.ml.promotion import PromotionDecision
+
+
+@pytest.fixture(autouse=True)
+def isolate_lifecycle_audit_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Ensure all lifecycle audit operations use an isolated temporary database."""
+    test_db = tmp_path / "lifecycle_audit.db"
+    monkeypatch.setattr(settings, "lifecycle_audit_db_path", str(test_db))
+    monkeypatch.setattr(settings, "promotion_audit_db_path", str(test_db))
+    return test_db
 
 
 @pytest.fixture

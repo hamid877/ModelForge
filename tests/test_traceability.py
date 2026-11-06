@@ -28,6 +28,17 @@ from backend.app.ml.tracking import (
 from backend.app.ml.workflow import run_training, run_training_and_promote
 
 
+@pytest.fixture(autouse=True)
+def isolate_traceability_settings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> Path:
+    """Ensure all traceability tests use isolated temporary databases."""
+    test_db = tmp_path / "isolated_traceability_default.db"
+    monkeypatch.setattr(settings, "lifecycle_audit_db_path", str(test_db))
+    monkeypatch.setattr(settings, "promotion_audit_db_path", str(test_db))
+    return test_db
+
+
 @pytest.fixture
 def sample_training_df():
     """Sample churn training dataframe disjoint from benchmark data."""

@@ -70,6 +70,10 @@ class Settings(BaseSettings):
         default=3600,
         ge=0,
     )
+    retraining_job_timeout_seconds: float = Field(
+        default=600.0,
+        gt=0.0,
+    )
 
     # Promotion quality gate and shared benchmark settings
     # Note: Requiring an F1 improvement margin prevents accidental promotions
