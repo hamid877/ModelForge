@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from backend.app.config import settings
 from backend.app.ml.db import (
     db_connection,
     get_db_connection,
@@ -25,6 +26,17 @@ from backend.app.ml.drift_alerts import (
     record_alert_action,
 )
 from backend.app.ml.migrations import migrate_audit_database_idempotent
+
+
+@pytest.fixture(autouse=True)
+def isolate_drift_alerts_settings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> Path:
+    """Ensure all drift alert tests use isolated temporary databases."""
+    test_db = tmp_path / "isolated_drift_alerts_default.db"
+    monkeypatch.setattr(settings, "lifecycle_audit_db_path", str(test_db))
+    monkeypatch.setattr(settings, "promotion_audit_db_path", str(test_db))
+    return test_db
 
 
 @pytest.fixture

@@ -14,6 +14,7 @@ import pytest
 from mlflow.exceptions import MlflowException
 from mlflow.protos.databricks_pb2 import ErrorCode
 
+from backend.app.config import settings
 from backend.app.ml.audit import (
     get_operator_resolution_audit,
     record_promotion_audit,
@@ -36,6 +37,19 @@ from backend.app.ml.reconciliation import (
     reconcile_job,
 )
 from backend.app.ml.worker import RetrainingWorker
+
+
+@pytest.fixture(autouse=True)
+def isolate_reconciliation_settings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> Path:
+    """Ensure reconciliation operations are isolated from production DB and locks."""
+    isolated_db = tmp_path / "isolated_reconciliation.db"
+    isolated_lock = tmp_path / "isolated_reconciliation.lock"
+    monkeypatch.setattr(settings, "lifecycle_audit_db_path", str(isolated_db))
+    monkeypatch.setattr(settings, "promotion_audit_db_path", str(isolated_db))
+    monkeypatch.setattr(settings, "worker_lock_path", str(isolated_lock))
+    return isolated_db
 
 
 @pytest.fixture

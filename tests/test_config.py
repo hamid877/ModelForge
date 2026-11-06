@@ -103,6 +103,7 @@ def test_retraining_orchestration_settings(monkeypatch):
         "MODELFORGE_RETRAINING_MAX_ATTEMPTS",
         "MODELFORGE_RETRAINING_POLL_INTERVAL_SECONDS",
         "MODELFORGE_RETRAINING_COOLDOWN_SECONDS",
+        "MODELFORGE_RETRAINING_JOB_TIMEOUT_SECONDS",
     ]
     for var in env_vars:
         monkeypatch.delenv(var, raising=False)
@@ -115,6 +116,7 @@ def test_retraining_orchestration_settings(monkeypatch):
     assert config.retraining_max_attempts == 3
     assert config.retraining_poll_interval_seconds == 5.0
     assert config.retraining_cooldown_seconds == 3600
+    assert config.retraining_job_timeout_seconds == 600.0
 
     monkeypatch.setenv("MODELFORGE_SQLITE_BUSY_TIMEOUT_MS", "10000")
     monkeypatch.setenv("MODELFORGE_WORKER_LOCK_PATH", "data/custom_worker.lock")
@@ -123,6 +125,7 @@ def test_retraining_orchestration_settings(monkeypatch):
     monkeypatch.setenv("MODELFORGE_RETRAINING_MAX_ATTEMPTS", "5")
     monkeypatch.setenv("MODELFORGE_RETRAINING_POLL_INTERVAL_SECONDS", "2.5")
     monkeypatch.setenv("MODELFORGE_RETRAINING_COOLDOWN_SECONDS", "1800")
+    monkeypatch.setenv("MODELFORGE_RETRAINING_JOB_TIMEOUT_SECONDS", "300.0")
 
     custom = Settings(_env_file=None)
     assert custom.sqlite_busy_timeout_ms == 10000
@@ -132,6 +135,7 @@ def test_retraining_orchestration_settings(monkeypatch):
     assert custom.retraining_max_attempts == 5
     assert custom.retraining_poll_interval_seconds == 2.5
     assert custom.retraining_cooldown_seconds == 1800
+    assert custom.retraining_job_timeout_seconds == 300.0
 
 
 def test_retraining_cooldown_validation(monkeypatch):
@@ -141,5 +145,20 @@ def test_retraining_cooldown_validation(monkeypatch):
     assert config_zero.retraining_cooldown_seconds == 0
 
     monkeypatch.setenv("MODELFORGE_RETRAINING_COOLDOWN_SECONDS", "-1")
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None)
+
+
+def test_retraining_job_timeout_validation(monkeypatch):
+    """Verify job timeout accepts positive float and rejects non-positive values."""
+    monkeypatch.setenv("MODELFORGE_RETRAINING_JOB_TIMEOUT_SECONDS", "10.5")
+    config = Settings(_env_file=None)
+    assert config.retraining_job_timeout_seconds == 10.5
+
+    monkeypatch.setenv("MODELFORGE_RETRAINING_JOB_TIMEOUT_SECONDS", "0")
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None)
+
+    monkeypatch.setenv("MODELFORGE_RETRAINING_JOB_TIMEOUT_SECONDS", "-5.0")
     with pytest.raises(ValidationError):
         Settings(_env_file=None)

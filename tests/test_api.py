@@ -22,6 +22,15 @@ def mock_migration_setup(monkeypatch):
     monkeypatch.setattr(api_module, "migrate_audit_database_idempotent", lambda _: None)
 
 
+@pytest.fixture(autouse=True)
+def isolate_api_audit_db(tmp_path, monkeypatch):
+    """Ensure all API database interactions use an isolated temporary database."""
+    test_db = tmp_path / "api_audit.db"
+    monkeypatch.setattr(api_module.settings, "lifecycle_audit_db_path", str(test_db))
+    monkeypatch.setattr(api_module.settings, "promotion_audit_db_path", str(test_db))
+    return test_db
+
+
 @patch("backend.app.api.api.load_registered_model_by_alias")
 def test_health_endpoint(mock_load_model):
     mock_load_model.return_value.predict.return_value = [0]

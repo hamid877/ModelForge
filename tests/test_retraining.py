@@ -1,9 +1,11 @@
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from unittest.mock import patch
 
 import pandas as pd
 import pytest
 
+from backend.app.config import settings
 from backend.app.ml.db import db_connection, immediate_transaction
 from backend.app.ml.drift_alerts import get_alert_actions, list_drift_alerts
 from backend.app.ml.jobs import (
@@ -16,6 +18,17 @@ from backend.app.ml.retraining import (
     assess_retraining_need,
     evaluate_retraining_policy,
 )
+
+
+@pytest.fixture(autouse=True)
+def isolate_retraining_settings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> Path:
+    """Ensure all retraining policy tests use isolated temporary databases."""
+    test_db = tmp_path / "isolated_retraining_default.db"
+    monkeypatch.setattr(settings, "lifecycle_audit_db_path", str(test_db))
+    monkeypatch.setattr(settings, "promotion_audit_db_path", str(test_db))
+    return test_db
 
 
 @pytest.fixture
