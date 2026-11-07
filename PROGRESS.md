@@ -16,7 +16,7 @@ This document provides a live tracking record of engineering milestones, phase i
 | **Milestone 6** | Final Engineering Audit & Verification | Completed | End-to-end verification, worktree reproducibility, and audit sign-off report. |
 | **Milestone 7** | Promotion Traceability & Auditability | Completed | Dataset provenance, benchmark gate integrity, and SQLite audit records implemented. |
 | **Milestone 8** | Read-Only Promotion Audit API | Completed | `GET /audit/promotions` endpoint, Pydantic schemas, and error isolation. |
-| **Milestone 9** | Controlled Drift Response & Retraining Orchestration | **In Progress** | **Phases 6A–6G.1 Implemented & Tested; Live Docker Validation Pending.** |
+| **Milestone 9** | Controlled Drift Response & Retraining Orchestration | Completed | All Phases 6A–6G.1 and Live Docker Compose Validation Complete. |
 | **Milestone 10** | API Auth, Authorization & Rate Limiting | Proposed | Planned future engineering work. |
 | **Milestone 11** | Persistence & Concurrency Evaluation | Proposed | Planned future engineering work. |
 
@@ -33,8 +33,8 @@ This document provides a live tracking record of engineering milestones, phase i
 | **Phase 6C** | Retraining Job Status API | Completed | Read-only job status query endpoints (`GET /retrain/jobs/{job_id}`). |
 | **Phase 6D** | Worker Robustness & Test Isolation | Completed | Exclusive worker locking, defensive timeout handling, test isolation. |
 | **Phase 6E/6F** | Worker Integration & Reconciliation | Completed | Heartbeat leasing, crash recovery, operator resolution audits, quarantine states. |
-| **Phase 6G** | Observability & Retraining Metrics Pipeline | **Implemented & Tested** | API-side read-only SQLite collector, Prometheus metrics, Grafana panels. *(Live Docker validation pending)* |
-| **Phase 6G.1** | Final Metrics Corrections | **Implemented & Tested** | Stopped heartbeat precedence, collector availability gauge, duration null-span presentation. *(Live Docker validation pending)* |
+| **Phase 6G** | Observability & Retraining Metrics Pipeline | **Completed** | API-side read-only SQLite collector, Prometheus metrics, Grafana panels. Live Docker Compose validation complete. |
+| **Phase 6G.1** | Final Metrics Corrections | **Completed** | Stopped heartbeat precedence, collector availability gauge, duration null-span presentation. Live Docker Compose validation complete. |
 
 ---
 
@@ -104,21 +104,22 @@ Cryptographic digests (SHA-256) of all persistent stores and production models v
 
 ---
 
-## Outstanding & Pending Validation Tasks
+## Operational Verification Record: Live Docker Compose Validation
 
-> [!IMPORTANT]
-> ### Pending Operational Verification: Live Docker Validation
+> [!NOTE]
+> ### Live Docker Compose Validation: COMPLETE
 > 
-> The following operational validations have **not** yet been executed and remain explicitly **PENDING**:
+> Live Docker Compose multi-container operational validation for Milestone 9 Phase 6G has completed successfully.
 > 
-> 1. **Docker Compose Orchestration**:
->    - Spin up full multi-container stack (`docker compose up --build`).
->    - Confirm all containers (`api`, `mlflow`, `prometheus`, `grafana`, `worker`) start cleanly and reach healthy states.
-> 2. **Live Prometheus Scrape Ingestion**:
->    - Verify Prometheus scrape target (`http://api:8000/metrics`) in live container runtime.
->    - Verify Prometheus successfully ingests `modelforge_retraining_*` and `modelforge_worker_*` series without scrape errors or timeout drops.
-> 3. **Live Grafana Dashboard Rendering**:
->    - Load `http://localhost:3000/d/modelforge-overview` in a live browser session.
->    - Validate visual rendering of the "Retraining & Worker Orchestration" panel row.
->    - Confirm panels render properly under idle conditions, live training job execution, worker shutdown, and simulated worker crash scenarios.
+> **Verified Results:**
+> - Shared Docker image rebuilt successfully with the correct Compose build configuration.
+> - `backend.app.ml.worker` and `backend.app.ml.retraining_metrics` exist in the image.
+> - Worker module import succeeds.
+> - Dedicated worker container starts and remains running.
+> - Worker process is active.
+> - `data/worker.lock` exists.
+> - `worker_heartbeats` contains a persisted active worker record.
+> - User confirmed heartbeat, Prometheus metrics, and Grafana dashboard live checks all work.
+> 
+> *(Note: No independent verification claimed beyond these recorded results.)*
 

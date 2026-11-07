@@ -35,6 +35,9 @@ services:
 
   api:
     image: modelforge-api:dev
+    build:
+      context: .
+      dockerfile: Dockerfile
     user: "1000:1000"
     environment:
       MODELFORGE_MODEL_NAME: churn-classifier
