@@ -38,6 +38,7 @@ from backend.app.ml.lock import (
     resolve_shared_lock_path,
 )
 from backend.app.ml.migrations import migrate_audit_database_idempotent
+from backend.app.ml.retraining_metrics import record_worker_heartbeat
 
 logger = logging.getLogger(__name__)
 
@@ -258,6 +259,14 @@ class RetrainingWorker:
         self._shutdown_event.set()
         if self._current_context is not None:
             self._current_context.cancel_event.set()
+        try:
+            record_worker_heartbeat(
+                self.database_path,
+                worker_id=self.worker_id,
+                status="stopped",
+            )
+        except Exception:
+            pass
 
     def _migrate_database_schema(self) -> None:
         """Ensure audit database schema is initialized after lock acquisition."""
@@ -320,6 +329,13 @@ class RetrainingWorker:
         if not self._schema_migrated:
             self._migrate_database_schema()
 
+        # Update worker heartbeat during each active polling iteration
+        record_worker_heartbeat(
+            self.database_path,
+            worker_id=self.worker_id,
+            status="active",
+        )
+
         # 1. Recover expired leases adhering strictly to retry and quarantine rules
         recover_expired_jobs(self.database_path)
 
@@ -369,6 +385,11 @@ class RetrainingWorker:
                         worker_id=self.worker_id,
                         lease_token=lease_token,
                         lease_duration_seconds=self.lease_duration_seconds,
+                    )
+                    record_worker_heartbeat(
+                        self.database_path,
+                        worker_id=self.worker_id,
+                        status="active",
                     )
                     logger.debug(
                         "lease_heartbeat_extended",
@@ -983,6 +1004,14 @@ class RetrainingWorker:
                 )
                 self.wait_for_containment()
         finally:
+            try:
+                record_worker_heartbeat(
+                    self.database_path,
+                    worker_id=self.worker_id,
+                    status="stopped",
+                )
+            except Exception:
+                pass
             self.release_lock()
             logger.info("worker_stopped", extra={"worker_id": self.worker_id})
 
