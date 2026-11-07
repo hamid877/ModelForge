@@ -12,6 +12,7 @@ Validates:
 """
 
 import hashlib
+import os
 import subprocess
 import threading
 import time
@@ -190,15 +191,24 @@ def test_compose_shared_volumes_parity():
 
 def test_docker_compose_config_cli():
     """Run `docker compose config` to ensure compose specification is valid."""
+    ci_env = os.environ.copy()
+    # Provide dedicated dummy CI credentials when .env is absent (e.g. GitHub Actions)
+    if not ci_env.get("GRAFANA_ADMIN_USER"):
+        ci_env["GRAFANA_ADMIN_USER"] = "ci-dummy-admin"
+    if not ci_env.get("GRAFANA_ADMIN_PASSWORD"):
+        ci_env["GRAFANA_ADMIN_PASSWORD"] = "ci-dummy-password"
+
     result = subprocess.run(
         ["docker", "compose", "config"],
         cwd=COMPOSE_FILE.parent,
         capture_output=True,
         text=True,
+        env=ci_env,
     )
+    # Output is captured without echoing resolved compose config containing credentials
     assert result.returncode == 0, f"docker compose config failed:\n{result.stderr}"
-    assert "worker:" in result.stdout
-    assert "api:" in result.stdout
+    assert "worker:" in result.stdout, "worker service definition not found"
+    assert "api:" in result.stdout, "api service definition not found"
 
 
 # ============================================================================
