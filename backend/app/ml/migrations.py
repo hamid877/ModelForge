@@ -236,6 +236,15 @@ BEGIN
 END;
 """
 
+WORKER_HEARTBEATS_SQL = """
+CREATE TABLE IF NOT EXISTS worker_heartbeats (
+    worker_id TEXT PRIMARY KEY CHECK (length(worker_id) > 0),
+    heartbeat_at TEXT NOT NULL,
+    started_at TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('active', 'stopped'))
+);
+"""
+
 
 def migrate_audit_database_idempotent(database_path: str | Path) -> None:
     """Ensure audit database schema is upgraded idempotently without data loss.
@@ -370,6 +379,13 @@ def migrate_audit_database_idempotent(database_path: str | Path) -> None:
             )
             conn.execute(OPERATOR_RESOLUTION_AUDIT_TRIGGER_UPDATE)
             conn.execute(OPERATOR_RESOLUTION_AUDIT_TRIGGER_DELETE)
+
+            # Step 7: Worker heartbeats
+            conn.execute(WORKER_HEARTBEATS_SQL)
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_worker_heartbeats_heartbeat_at "
+                "ON worker_heartbeats(heartbeat_at);"
+            )
 
             conn.execute("COMMIT;")
         except Exception:

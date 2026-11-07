@@ -236,20 +236,22 @@ Compose starts services in dependency order:
 
 ```
 mlflow  (already healthy)
-  └── api           (waits for mlflow: healthy)
-        └── prometheus  (waits for api: healthy)
-              └── grafana     (waits for prometheus: healthy)
+  ├── api           (waits for mlflow: healthy)
+  │     └── prometheus  (waits for api: healthy)
+  │           └── grafana     (waits for prometheus: healthy)
+  └── worker        (waits for mlflow: healthy)
 ```
 
 The full stack may take 2–3 minutes for all health checks to clear on a
 cold start.
 
-### Local endpoints
+### Local endpoints & background services
 
-| Service | URL | Notes |
+| Service | URL / Mode | Notes |
 |---|---|---|
 | **API** | http://localhost:8000 | FastAPI application |
 | **API docs** | http://localhost:8000/docs | Swagger UI |
+| **Worker** | Background daemon | Retraining runner (`docker compose logs -f worker`) |
 | **MLflow UI** | http://localhost:5001 | Experiment tracking and model registry |
 | **Prometheus** | http://localhost:9090 | Metrics query interface |
 | **Grafana** | http://localhost:3000 | Pre-provisioned dashboards (login with `.env` credentials) |

@@ -16,6 +16,13 @@ This document outlines the milestones established during the AI Engineering audi
 | **Milestone 6** | Final Engineering Audit & Verification | Completed | Performed evidence-based end-to-end audit, clean-clone reproducibility in isolated worktree, service persistence validation, CLI bootstrap fix, and produced final engineering sign-off report. |
 | **Milestone 7** | Promotion Traceability & Auditability | Completed | Implemented dataset provenance tracking, promotion evaluation traceability, SQLite and MLflow decision audit records, and fail-closed safety gates. |
 | **Milestone 8** | Read-Only Promotion Audit API | Completed | Implemented read-only HTTP endpoint (`GET /audit/promotions`) with strict Pydantic schemas, isolated SQLite query execution, defensive error handling, and comprehensive test coverage. |
+| **Milestone 9** | Controlled Drift Response and Retraining Orchestration | Completed | Bridge drift detection and model retraining with automated trigger policy, concurrency locking, cooldown guardrails, asynchronous worker orchestration, and Prometheus/Grafana observability. All Phases 6A–6G.1 and live Docker Compose validation complete. |
+
+---
+
+## In Progress Engineering Milestones
+
+*No engineering milestones are currently in progress. Milestones 1–9 are complete; Milestones 10–11 are proposed.*
 
 ---
 
@@ -25,7 +32,6 @@ This document outlines the milestones established during the AI Engineering audi
 
 | Milestone | Title | Status | Description |
 |---|---|---|---|
-| **Milestone 9** | Controlled Drift Response and Retraining Orchestration | Proposed | Bridge drift detection and model retraining with automated trigger policy, concurrency locking, cooldown guardrails, and fail-closed promotion integration. |
 | **Milestone 10** | API Authentication, Authorization and Rate Limiting | Proposed | Introduce lightweight authentication middleware, role-based route protection, and token-bucket rate limiting for prediction, monitoring, and audit endpoints. |
 | **Milestone 11** | Persistence and Concurrency Evaluation (with Justified PostgreSQL Migration) | Proposed | Benchmark SQLite concurrency and lock contention under multi-worker loads; execute a structured migration to PostgreSQL only if justified by empirical performance data. |
 
@@ -180,31 +186,55 @@ Expose persisted model promotion audit records through a dedicated, read-only HT
 
 ---
 
-## Detailed Proposed Milestone Scopes: Milestones 9–11
+## Detailed Milestone Scope: Milestone 9 — Controlled Drift Response and Retraining Orchestration
+
+### Status: Completed (Phases 6A–6G.1 Implemented & Tested; Live Docker Compose Validation Complete)
+
+#### Objective
+Bridge drift detection and model retraining with automated trigger policies, durable SQLite state machines, concurrency locking, cooldown guardrails, resilient background worker orchestration, fail-closed promotion integration, and end-to-end Prometheus/Grafana observability.
+
+#### Phase Breakdown & Implementation Progress
+- **Phase 6A — Drift Alert Persistence**: Durable SQLite persistence of drift alerts and severity tracking. *(Implemented & Tested)*
+- **Phase 6B — Drift Policy & Retraining Trigger Integration**: Automated evaluation of drift metrics against configurable trigger thresholds with cooldown enforcement and idempotency guards. *(Implemented & Tested)*
+- **Phase 6C — Retraining Job Status API**: Read-only job status query endpoints (`GET /retrain/jobs/{job_id}`) with structured Pydantic schemas. *(Implemented & Tested)*
+- **Phase 6D — Worker Robustness & Test Isolation**: Exclusive worker locking, defensive timeout handling, and test environment isolation. *(Implemented & Tested)*
+- **Phase 6E/6F — Worker Integration & Reconciliation**: Heartbeat leasing, crash recovery, operator-guided resolution audits (`operator_resolution_audit`), and quarantine state handling (`reconciliation_required`). *(Implemented & Tested)*
+- **Phase 6G — Observability & Retraining Metrics Pipeline**: API-side read-only SQLite metrics collector exposing queue depth, active jobs, monotonic terminal job counters, execution duration histograms, and worker heartbeat timestamps to Prometheus, visualized in Grafana. *(COMPLETE)*
+- **Phase 6G.1 — Final Metrics Corrections**: Graceful shutdown heartbeat precedence (`status="stopped"` -> `0.0`), collector availability gauge (`modelforge_retraining_collector_up`) with synthetic zero omission during DB outages, and Grafana duration panel idle-period presentation (`custom.spanNulls: true`). *(COMPLETE)*
+
+#### Phase 6G & 6G.1 Key Deliverables
+- **Read-Only SQLite Metrics Collector (`backend/app/ml/retraining_metrics.py`)**:
+  - Connects using `file:{db_path}?mode=ro` (zero write transactions, zero schema migrations during scrape).
+  - Collects queue depth (`modelforge_retraining_queue_depth`) and active jobs (`modelforge_retraining_active_jobs`).
+  - Emits monotonic cumulative counters (`modelforge_retraining_jobs_total{status="succeeded|rejected|failed|reconciliation_required"}`) using `COUNT(DISTINCT job_id)` across resolution audits to prevent double-counting.
+  - Generates cumulative duration histograms (`modelforge_retraining_execution_duration_seconds`) statelessly via SQL bucket aggregation over completed jobs.
+  - Emits worker heartbeat timestamp (`modelforge_worker_heartbeat_timestamp_seconds`), correctly preserving crash staleness while enforcing explicit `0.0` upon graceful stop.
+  - Emits collector availability gauge (`modelforge_retraining_collector_up`), omitting retraining series on database errors to prevent artificial Prometheus counter resets while keeping prediction metrics online.
+- **FastAPI Prometheus Integration (`backend/app/api/api.py`)**:
+  - Appends formatted retraining metrics into the `/metrics` Prometheus exposition endpoint without impacting prediction latency.
+- **Grafana Dashboard Panel Row (`monitoring/grafana/dashboards/modelforge-overview.json`)**:
+  - Added "Retraining & Worker Orchestration" panel row containing Queue Depth, Active Jobs, Job Outcomes, Retraining Execution Duration (with `spanNulls: true`), and Worker Liveness & Heartbeat panels.
+- **Verification Status**:
+  - **Unit & Integration Tests**: 15/15 focused retraining metrics tests passed (`tests/test_retraining_metrics.py`), 55/55 API tests passed (`tests/test_api.py`), 446/446 full test suite passed.
+  - **Lint & Format**: Clean passes on `ruff check` and `ruff format`.
+  - **Persistent Integrity**: `data/lifecycle_audit.db` and `mlflow-data/mlflow.db` SHA-256 digests remained identical before and after test execution.
+  - **Live Docker Compose Validation**: **COMPLETE**
+    - Shared Docker image rebuilt successfully with the correct Compose build configuration.
+    - `backend.app.ml.worker` and `backend.app.ml.retraining_metrics` exist in the image.
+    - Worker module import succeeds.
+    - Dedicated worker container starts and remains running.
+    - Worker process is active.
+    - `data/worker.lock` exists.
+    - `worker_heartbeats` contains a persisted active worker record.
+    - User confirmed heartbeat, Prometheus metrics, and Grafana dashboard live checks all work.
+    - *(No independent verification claimed beyond these recorded results.)*
+
+---
+
+## Detailed Proposed Milestone Scopes: Milestones 10–11
 
 > **Status: Proposed / Unscheduled.**<br>
 > The following scopes describe proposed technical enhancements. None of these milestones are completed, and their implementation remains subject to engineering prioritization, capacity, and empirical validation. ModelForge remains a local development stack and does not claim production readiness.
-
-### Proposed Milestone 9: Controlled Drift Response and Retraining Orchestration
-
-#### Objective
-Design an automated, controlled retraining workflow triggered by statistical drift detection while preventing uncontrolled retraining loops, resource exhaustion, and unverified candidate promotions.
-
-#### Proposed Scope
-- **Drift Policy & Trigger Guardrails**: Policy-based evaluation of drift endpoint results (`/monitoring/drift`), requiring minimum sample sizes, statistical significance thresholds, and minimum cooldown intervals between retraining runs.
-- **Asynchronous Retraining Execution**: Decouple real-time drift monitoring requests from retraining execution using background tasks or an asynchronous job runner, ensuring drift endpoint responsiveness.
-- **Concurrency Locking**: Implement process/task mutex locking to guarantee that at most one retraining job runs at any given time, rejecting concurrent triggers with a deterministic status.
-- **Strict Quality Gate & Provenance Integration**: Every retrained candidate must undergo identical Milestone 7 provenance extraction and Milestone 7/8 benchmark evaluation gates; failure to exceed champion performance preserves the active champion and logs an audited rejection.
-- **Observability & Metrics**: Expose Prometheus counters for retraining triggers (`modelforge_drift_retraining_triggered_total`), completions (`modelforge_drift_retraining_succeeded_total`), and failures (`modelforge_drift_retraining_failed_total`).
-
-#### Measurable Acceptance Criteria
-1. **Trigger verification**: Retraining triggers only when drift is statistically confirmed ($p < \text{threshold}$ across $\ge \text{min\_samples}$) AND cooldown interval has elapsed; drift reports below threshold or within cooldown window produce 0 triggers.
-2. **Concurrency constraint**: Concurrently triggered retraining attempts while a job is running return HTTP 409 Conflict or queue status, maintaining concurrency $\le 1$.
-3. **Gate integrity**: 100% of retrained candidate models pass through the shared benchmark gate; no model with $\text{F1} \le \text{champion\_f1} + \text{margin}$ is promoted to `champion`.
-4. **Latency isolation**: The drift detection endpoint (`/monitoring/drift`) response time remains unaffected ($< 50\text{ms}$ overhead) during triggered retraining execution.
-5. **Test coverage**: $\ge 90\%$ branch coverage across drift trigger evaluation, cooldown locking, background execution, and fail-closed error handling.
-
----
 
 ### Proposed Milestone 10: API Authentication, Authorization and Rate Limiting
 

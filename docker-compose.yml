@@ -35,6 +35,9 @@ services:
 
   api:
     image: modelforge-api:dev
+    build:
+      context: .
+      dockerfile: Dockerfile
     user: "1000:1000"
     environment:
       MODELFORGE_MODEL_NAME: churn-classifier
@@ -43,6 +46,7 @@ services:
     volumes:
       - ./mlruns:/mlruns
       - ./data:/app/data
+      - ./models:/app/models
     ports:
       - "127.0.0.1:8000:8000"
     depends_on:
@@ -55,6 +59,34 @@ services:
       retries: 12
       start_period: 30s
     restart: unless-stopped
+
+  worker:
+    image: modelforge-api:dev
+    user: "1000:1000"
+    command:
+      - uv
+      - run
+      - --no-sync
+      - python
+      - -m
+      - backend.app.ml.worker
+      - --handler
+      - production
+    environment:
+      MODELFORGE_MODEL_NAME: churn-classifier
+      MODELFORGE_MODEL_ALIAS: champion
+      MODELFORGE_MLFLOW_TRACKING_URI: http://mlflow:5000
+    volumes:
+      - ./mlruns:/mlruns
+      - ./data:/app/data
+      - ./models:/app/models
+    depends_on:
+      mlflow:
+        condition: service_healthy
+    restart: unless-stopped
+    stop_grace_period: 60s
+    deploy:
+      replicas: 1
 
   prometheus:
     image: prom/prometheus:v3.5.0

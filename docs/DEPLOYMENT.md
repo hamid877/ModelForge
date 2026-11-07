@@ -18,12 +18,13 @@
 7. [Security Considerations](#7-security-considerations)
 8. [Known Limitations](#8-known-limitations)
 9. [Promotion Audit API](#9-promotion-audit-api)
+10. [Retraining Worker Service](#10-retraining-worker-service)
 
 ---
 
 ## 1. Service Architecture
 
-ModelForge is a four-service Docker Compose stack. All services are defined in
+ModelForge is a five-service Docker Compose stack. All services are defined in
 `docker-compose.yml` at the repository root.
 
 ```
@@ -35,8 +36,15 @@ ModelForge is a four-service Docker Compose stack. All services are defined in
 │                        │  Artifact store: ./mlruns/          │
 │                                                              │
 │  127.0.0.1:8000 ──► api (modelforge-api:dev)                │
-│                        │  reads ./mlruns/ (artifact store)   │
-│                        │  reads ./data/   (CSV reference)    │
+│                        │  reads/writes ./mlruns/ (artifacts) │
+│                        │  reads/writes ./data/   (DB, CSV)   │
+│                        │  reads/writes ./models/ (models)    │
+│                                                              │
+│  (background)   ──► worker (modelforge-api:dev)              │
+│                        │  connects to http://mlflow:5000     │
+│                        │  reads/writes ./mlruns/ (artifacts) │
+│                        │  reads/writes ./data/   (DB, lock)  │
+│                        │  reads/writes ./models/ (models)    │
 │                                                              │
 │  127.0.0.1:9090 ──► prometheus (prom/prometheus:v3.5.0)     │
 │                        │  scrapes api:8000/metrics/prometheus│
@@ -53,28 +61,33 @@ ModelForge is a four-service Docker Compose stack. All services are defined in
 | Service | Image | Source |
 |---|---|---|
 | `mlflow` | `modelforge-api:dev` | Built locally from `Dockerfile` |
-| `api` | `modelforge-api:dev` | Same image; different `command` entrypoint |
+| `api` | `modelforge-api:dev` | Same image; default FastAPI `CMD` |
+| `worker` | `modelforge-api:dev` | Same image; worker CLI `command` |
 | `prometheus` | `prom/prometheus:v3.5.0` | Docker Hub upstream |
 | `grafana` | `grafana/grafana:12.2.0` | Docker Hub upstream |
 
-Both `mlflow` and `api` use the same image. The MLflow server is launched by
-overriding `command:` in Compose; the API uses the image's default `CMD`.
+`mlflow`, `api`, and `worker` all share the identical `modelforge-api:dev` image:
+- The MLflow server overrides `command:` in Compose.
+- The API uses the Dockerfile default `CMD` (`uvicorn backend.app.api.api:app`).
+- The worker overrides `command:` to run `uv run --no-sync python -m backend.app.ml.worker --handler production`.
 
 ### Startup dependency chain
 
 Compose enforces a strict health-check dependency order:
 
 ```
-mlflow (healthy) → api (healthy) → prometheus (healthy) → grafana
+mlflow (healthy) ──┬──► api (healthy) ──► prometheus (healthy) ──► grafana
+                   │
+                   └──► worker
 ```
 
-If any service fails its health check, downstream services do not start.
+The worker operates independently of FastAPI and depends strictly on the `mlflow` service being healthy before starting. If MLflow is unhealthy, neither the API nor the worker will start.
 
 ### Container user
 
-Both `mlflow` and `api` containers run as UID/GID `1000:1000` (the `modelforge`
+`mlflow`, `api`, and `worker` containers all run as UID/GID `1000:1000` (the `modelforge`
 system user created in the Dockerfile). Ensure that host directories mounted
-into these containers (`./mlflow-data/`, `./mlruns/`, `./data/`) are readable
+into these containers (`./mlflow-data/`, `./mlruns/`, `./data/`, `./models/`) are readable
 and writable by UID 1000.
 
 ---
@@ -233,14 +246,15 @@ ModelForge uses a mix of **bind mounts** (host paths) and **named volumes**
 | Host path | Service | Content | Gitignored? |
 |---|---|---|---|
 | `./mlflow-data/` | `mlflow` | SQLite database (`mlflow.db`) | Yes |
-| `./mlruns/` | `mlflow`, `api` | MLflow artifact store | Yes |
-| `./data/` | `api` | Training data and audit DB | Partially* |
+| `./mlruns/` | `mlflow`, `api`, `worker` | MLflow artifact store | Yes |
+| `./data/` | `api`, `worker` | Datasets, SQLite lifecycle audit DB, worker.lock | Partially* |
+| `./models/` | `api`, `worker` | Model artifacts and candidate joblib files | Partially** |
 | `./monitoring/prometheus/prometheus.yml` | `prometheus` | Scrape config (read-only) | No |
 | `./monitoring/grafana/provisioning/` | `grafana` | Dashboard provisioning (read-only) | No |
 | `./monitoring/grafana/dashboards/` | `grafana` | Dashboard JSON files (read-only) | No |
 
-\* `data/raw/churn.csv` is tracked in Git; `data/lifecycle_audit.db` and
-`data/processed/` are gitignored.
+\* `data/raw/churn.csv` and `data/benchmark/churn_benchmark.csv` are tracked in Git; `data/lifecycle_audit.db`, `data/worker.lock`, and `data/processed/` are gitignored.  
+\*\* `models/` directory structure is preserved, but individual `.joblib` / `.pkl` binaries are gitignored.
 
 ### Named volumes
 
@@ -574,3 +588,166 @@ curl "http://127.0.0.1:8000/audit/promotions?limit=1"
   }
 ]
 ```
+
+---
+
+## 10. Retraining Worker Service
+
+The `worker` service is a dedicated background runner that polls for queued retraining jobs, claims leases atomically, executes model training and evaluation using the production handler (`ControlledTrainingJobHandler`), and manages model promotion under strict quality gates.
+
+### 10.1 Service Configuration & Startup Command
+
+The worker runs in Docker Compose as an independent service using the shared `modelforge-api:dev` image:
+
+```yaml
+worker:
+  image: modelforge-api:dev
+  user: "1000:1000"
+  command:
+    - uv
+    - run
+    - --no-sync
+    - python
+    - -m
+    - backend.app.ml.worker
+    - --handler
+    - production
+  environment:
+    MODELFORGE_MODEL_NAME: churn-classifier
+    MODELFORGE_MODEL_ALIAS: champion
+    MODELFORGE_MLFLOW_TRACKING_URI: http://mlflow:5000
+  volumes:
+    - ./mlruns:/mlruns
+    - ./data:/app/data
+    - ./models:/app/models
+  depends_on:
+    mlflow:
+      condition: service_healthy
+  restart: unless-stopped
+  stop_grace_period: 60s
+  deploy:
+    replicas: 1
+```
+
+### 10.2 Operations
+
+#### Starting Services
+```bash
+# Start MLflow first, then API and Worker
+docker compose up -d mlflow
+# Ensure MLflow is healthy before launching API and worker:
+docker compose up -d api worker
+# Or launch the entire stack in one command:
+make up
+```
+
+#### Inspecting Worker Logs
+```bash
+# Stream worker logs in real time
+docker compose logs -f worker
+
+# View last 100 log lines with timestamps
+docker compose logs --tail=100 -t worker
+```
+
+#### Stopping the Deployment Safely
+```bash
+# Stop worker independently (allows graceful wind-down)
+docker compose stop worker
+
+# Stop entire stack safely
+docker compose stop
+# Or tear down containers while preserving volumes
+docker compose down
+```
+
+### 10.3 Single-Worker Enforcement & Standby Behavior
+
+The deployment strictly supports **exactly one active worker process**.
+
+- **Flock Lock Protection**: Worker execution is guarded by kernel-level non-blocking file descriptor locking (`fcntl.flock(LOCK_EX | LOCK_NB)`) on `data/worker.lock`.
+- **Standby Polling Mode (Avoiding Crash Loops)**: If a second worker starts while another worker holds the lock, it does not exit immediately or enter an uncontrolled restart loop. Instead, `RetrainingWorker.run()` catches `WorkerLockConflictError`, logs `worker_startup_lock_conflict_standby`, and waits in non-busy standby polling (`poll_interval_seconds = 5s`).
+- **Fail-Fast CLI Option**: For single-shot executions or scripts requiring immediate exit on conflict, `--once` or `--no-standby` causes the process to fail immediately with exit code 1.
+- **Failover & Recovery**: If the active worker crashes unexpectedly or is terminated, the kernel automatically releases the file descriptor flock. The standby worker acquires the lock on its next check and seamlessly assumes job execution.
+- **Integrity Guarantee**: Never delete, unlink, or recreate `worker.lock` manually while a container is running, as inode replacement breaks mutual exclusion across namespaces.
+
+### 10.4 Shared Volume and Filesystem Parity
+
+Both the `api` and `worker` services share identical volume mounts to ensure filesystem parity:
+
+| Host Path | Container Path | Purpose |
+|---|---|---|
+| `./data` | `/app/data` | Shared SQLite DB (`data/lifecycle_audit.db`), exclusive lock (`data/worker.lock`), drift reference dataset (`data/raw/churn.csv`), and shared benchmark dataset (`data/benchmark/churn_benchmark.csv`). |
+| `./models` | `/app/models` | Saved candidate models (`models/candidate_model.joblib`) and model artifacts. |
+| `./mlruns` | `/mlruns` | Local MLflow tracking artifact store. |
+
+Because `WORKDIR` is `/app` in both containers, relative paths such as `data/lifecycle_audit.db`, `data/worker.lock`, and `models/candidate_model.joblib` resolve to the exact same host files. Neither container operates on isolated local copies.
+
+### 10.5 Shutdown, Containment, and SIGKILL Behavior
+
+The worker implements Phase 6E.1 containment semantics. Configuring `stop_grace_period: 60s` in Docker Compose is an **operational compromise, NOT a guarantee of graceful shutdown**:
+
+1. **Graceful Shutdown (SIGTERM)**:
+   - When Docker signals stop (`docker compose stop worker`), the worker process receives `SIGTERM` and sets `cancel_event` on the active job context.
+   - Cooperative handlers check `context.is_cancelled` before expensive training or registry mutations and abort safely.
+   - If the handler terminates cleanly within `shutdown_timeout` (2s), the worker cleanly releases `WorkerLock` and exits with code 0.
+
+2. **Containment on Refused or Blocked Cancellation**:
+   - If a handler ignores cancellation or is blocked in a non-interruptible C extension (e.g. native scikit-learn fitting routines) or MLflow network I/O, the worker strictly adheres to Phase 6E.1 containment: **it refuses to release the lock and can wait indefinitely**.
+   - The worker maintains lock ownership and keeps the lease heartbeat active to ensure no secondary worker or recovery process can claim the job and race against the un-killable handler thread.
+   - Because Phase 6E.1 containment blocks indefinitely when cancellation is ignored, graceful shutdown is **not guaranteed**.
+
+3. **Operational Compromise & Docker SIGKILL**:
+   - Setting `stop_grace_period: 60s` in `docker-compose.yml` is an operational compromise between two extremes:
+     - The default Docker 10-second grace period is too short for model persistence and MLflow artifact uploads under disk/network contention.
+     - Setting the grace period to the full `job_timeout_seconds` (600s / 10 minutes) would unacceptably hang deployments, restarts, and CI/CD pipelines whenever a thread deadlocks.
+   - 60 seconds provides 4 full heartbeat intervals (15s each) and matches `retraining_lease_duration_seconds: 60s`.
+   - If a blocked handler causes containment to hold past 60 seconds, **Docker will forcibly terminate the container process with SIGKILL**.
+
+4. **Consequences of SIGKILL and Failure Recovery**:
+   When Docker terminates the worker with SIGKILL:
+   - **Kernel flock release**: The Linux kernel closes the worker's open file descriptor for `data/worker.lock`, releasing `fcntl.flock`.
+   - **Heartbeats cease**: The process and its heartbeat thread terminate immediately; no further lease extensions occur.
+   - **Lease expiration**: After `retraining_lease_duration_seconds: 60s` elapses without heartbeat updates, the active lease expires in SQLite.
+   - **Safe lease recovery (`recover_expired_jobs`)**:
+     - **Pre-marker jobs (`promotion_started_at IS NULL`)**: The job had not initiated MLflow registry promotion. The recovery supervisor safely requeues the job into `queued` status for another attempt (or marks it terminal `failed` if `attempt_count >= max_attempts`).
+     - **Post-marker jobs (`promotion_started_at IS NOT NULL`)**: The job had begun atomic promotion before termination. Automatic retry is strictly prohibited to prevent race conditions or duplicate promotions. The recovery supervisor immediately quarantines the job into `reconciliation_required` for operator inspection.
+   - All Phase 5 reconciliation safety invariants and Phase 6E.1 containment invariants are preserved.
+
+### 10.6 Operator Reconciliation Workflow
+
+When a job is quarantined in `reconciliation_required` (e.g. after SIGKILL during promotion or an ambiguous MLflow registry outcome):
+
+1. **Inspect Quarantined Evidence**:
+   ```bash
+   python -m backend.app.ml.reconciliation --job-id <JOB_ID> --inspect
+   ```
+   This displays immutable evidence: job status, candidate version, previous champion version, and promotion audit records.
+
+2. **Acquire Maintenance Lock and Reconcile**:
+   ```bash
+   python -m backend.app.ml.reconciliation \
+     --job-id <JOB_ID> \
+     --resolution <succeeded|rejected|abandoned> \
+     --reason "Verified candidate meets quality gate and alias points to version" \
+     --operator-id "ops-engineer-1"
+   ```
+   - The reconciliation tool acquires `MaintenanceLock` (`fcntl.flock` on `data/worker.lock`).
+   - If a worker container is running, the operator lock acquisition fails, preventing race conditions.
+   - If the operator specifies `--resolution succeeded`, the tool verifies MLflow alias alignment and updates SQLite atomically.
+   - If the operator specifies `--resolution rejected`, the tool verifies the champion alias was reverted/preserved and updates SQLite atomically.
+
+### 10.7 Relevant Environment Variables
+
+| Variable | Default in Compose | Description |
+|---|---|---|
+| `MODELFORGE_MLFLOW_TRACKING_URI` | `http://mlflow:5000` | MLflow tracking server URI inside Docker network |
+| `MODELFORGE_MODEL_NAME` | `churn-classifier` | Registered MLflow model name |
+| `MODELFORGE_MODEL_ALIAS` | `champion` | Target production alias |
+| `MODELFORGE_LIFECYCLE_AUDIT_DB_PATH` | `data/lifecycle_audit.db` | Shared SQLite lifecycle database |
+| `MODELFORGE_WORKER_LOCK_PATH` | `data/worker.lock` | Shared worker execution flock path |
+| `MODELFORGE_DRIFT_REFERENCE_PATH` | `data/raw/churn.csv` | Reference dataset for drift analysis |
+| `MODELFORGE_BENCHMARK_DATA_PATH` | `data/benchmark/churn_benchmark.csv` | Benchmark dataset for promotion gating |
+| `MODELFORGE_RETRAINING_LEASE_DURATION_SECONDS` | `60` | Duration of job claim lease |
+| `MODELFORGE_RETRAINING_HEARTBEAT_INTERVAL_SECONDS` | `15` | Interval between worker lease heartbeats |
+| `MODELFORGE_RETRAINING_JOB_TIMEOUT_SECONDS` | `600.0` | Maximum execution time before job timeout |
