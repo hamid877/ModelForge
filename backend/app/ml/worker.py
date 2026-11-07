@@ -120,6 +120,7 @@ class RetrainingWorker:
         lease_duration_seconds: int | None = None,
         shutdown_timeout: float | None = None,
         job_timeout_seconds: float | None = None,
+        standby: bool = True,
     ) -> None:
         self.database_path: Path = resolve_shared_database_path(database_path)
         self.lock_path: Path = resolve_shared_lock_path(lock_path)
@@ -128,6 +129,7 @@ class RetrainingWorker:
             raise ValueError("worker_id must be a non-empty string.")
 
         self.handler: JobHandler = handler or NoOpJobHandler()
+        self.standby: bool = standby
         self.poll_interval_seconds: float = (
             poll_interval_seconds
             if poll_interval_seconds is not None
@@ -869,7 +871,68 @@ class RetrainingWorker:
     def run(self) -> None:
         """Run worker polling loop with exclusive lock protection until stopped."""
         self._setup_signal_handlers()
-        self.acquire_lock()
+        if self.standby:
+            is_standby = False
+            standby_iterations = 0
+            while not self._shutdown_event.is_set():
+                try:
+                    self.acquire_lock()
+                    if is_standby:
+                        logger.info(
+                            "worker_standby_lock_acquired",
+                            extra={
+                                "worker_id": self.worker_id,
+                                "lock_path": str(self.lock_path),
+                                "standby_iterations": standby_iterations,
+                            },
+                        )
+                    break
+                except WorkerLockConflictError as exc:
+                    if not is_standby:
+                        is_standby = True
+                        logger.warning(
+                            "worker_startup_lock_conflict_standby",
+                            extra={
+                                "worker_id": self.worker_id,
+                                "lock_path": str(self.lock_path),
+                                "failure_reason": str(exc),
+                                "retry_interval": self.poll_interval_seconds,
+                            },
+                        )
+                    else:
+                        standby_iterations += 1
+                        # Emit lower-frequency informational log periodically (e.g. 60s)
+                        log_cadence = max(1, int(60 // self.poll_interval_seconds))
+                        if standby_iterations % log_cadence == 0:
+                            logger.info(
+                                "worker_standby_waiting_for_lock",
+                                extra={
+                                    "worker_id": self.worker_id,
+                                    "lock_path": str(self.lock_path),
+                                    "standby_iterations": standby_iterations,
+                                    "elapsed_seconds": round(
+                                        standby_iterations * self.poll_interval_seconds,
+                                        1,
+                                    ),
+                                },
+                            )
+                        else:
+                            logger.debug(
+                                "worker_standby_waiting_for_lock",
+                                extra={
+                                    "worker_id": self.worker_id,
+                                    "standby_iterations": standby_iterations,
+                                },
+                            )
+                    if self._shutdown_event.wait(timeout=self.poll_interval_seconds):
+                        logger.info(
+                            "worker_standby_shutdown_before_lock_acquired",
+                            extra={"worker_id": self.worker_id},
+                        )
+                        return
+        else:
+            self.acquire_lock()
+
         if not self._schema_migrated:
             self._migrate_database_schema()
         try:
@@ -965,6 +1028,11 @@ def main(argv: list[str] | None = None) -> int:
         help="Execute a single polling iteration and exit",
     )
     parser.add_argument(
+        "--no-standby",
+        action="store_true",
+        help="Fail fast and exit on lock conflict instead of waiting in standby",
+    )
+    parser.add_argument(
         "--handler",
         choices=["noop", "production"],
         required=True,
@@ -990,6 +1058,7 @@ def main(argv: list[str] | None = None) -> int:
         lease_duration_seconds=args.lease_duration,
         shutdown_timeout=args.shutdown_timeout,
         job_timeout_seconds=args.job_timeout,
+        standby=not args.no_standby,
     )
 
     try:

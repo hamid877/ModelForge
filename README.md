@@ -10,6 +10,7 @@ ModelForge is an end-to-end machine learning platform for customer churn predict
 - **REST Serving**: High-performance FastAPI service with per-request latency tracking and automated model loading on startup.
 - **Observability**: Prometheus metrics exposition and pre-provisioned Grafana dashboards.
 - **Drift Detection**: Kolmogorov-Smirnov test (numerical) and Chi-squared contingency test (categorical) with automated retraining evaluation.
+- **Retraining Worker**: Dedicated background execution daemon with exclusive process locking, atomic lease management, controlled model retraining, and gated promotion.
 
 ---
 
