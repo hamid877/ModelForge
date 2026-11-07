@@ -27,6 +27,10 @@ from backend.app.ml.jobs import get_active_job, get_job
 from backend.app.ml.migrations import migrate_audit_database_idempotent
 from backend.app.ml.registry import load_registered_model_by_alias
 from backend.app.ml.retraining import evaluate_retraining_policy
+from backend.app.ml.retraining_metrics import (
+    format_retraining_prometheus_metrics,
+    get_retraining_metrics_snapshot,
+)
 from backend.app.ml.tracking import setup_mlflow
 
 logger = logging.getLogger(__name__)
@@ -156,7 +160,7 @@ def prediction_metrics(request: Request) -> dict[str, int | float]:
 
 @app.get("/metrics/prometheus", include_in_schema=False)
 def prometheus_metrics(request: Request) -> Response:
-    """Expose prediction metrics in Prometheus text exposition format."""
+    """Expose prediction and retraining metrics in Prometheus text exposition format."""
     metrics = prediction_metrics(request)
 
     lines = [
@@ -230,6 +234,11 @@ def prometheus_metrics(request: Request) -> Response:
             f"{metrics['prediction_latency_p99_seconds']}"
         ),
     ]
+
+    # Append retraining and worker orchestration metrics
+    db_path = getattr(settings, "lifecycle_audit_db_path", None)
+    snapshot = get_retraining_metrics_snapshot(db_path)
+    lines.extend(format_retraining_prometheus_metrics(snapshot))
 
     return Response(
         content="\n".join(lines) + "\n",

@@ -1,11 +1,10 @@
-
 {
   "uid": "modelforge-overview",
   "title": "ModelForge - API Monitoring",
   "tags": ["modelforge", "mlops", "monitoring"],
   "timezone": "browser",
   "schemaVersion": 39,
-  "version": 1,
+  "version": 2,
   "refresh": "15s",
   "time": {
     "from": "now-1h",
@@ -105,6 +104,123 @@
       ],
       "fieldConfig": {
         "defaults": {"unit": "s"},
+        "overrides": []
+      }
+    },
+    {
+      "id": 7,
+      "title": "Retraining & Worker Orchestration",
+      "type": "row",
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 21},
+      "collapsed": false
+    },
+    {
+      "id": 8,
+      "title": "Retraining Queue Depth",
+      "type": "stat",
+      "gridPos": {"h": 5, "w": 8, "x": 0, "y": 22},
+      "datasource": {"type": "prometheus", "uid": "PBFA97CFB590B2093"},
+      "targets": [
+        {
+          "expr": "modelforge_retraining_queue_depth",
+          "legendFormat": "Queue Depth",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {"unit": "short"},
+        "overrides": []
+      }
+    },
+    {
+      "id": 9,
+      "title": "Active Retraining Jobs",
+      "type": "stat",
+      "gridPos": {"h": 5, "w": 8, "x": 8, "y": 22},
+      "datasource": {"type": "prometheus", "uid": "PBFA97CFB590B2093"},
+      "targets": [
+        {
+          "expr": "modelforge_retraining_active_jobs",
+          "legendFormat": "Active Jobs",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {"unit": "short"},
+        "overrides": []
+      }
+    },
+    {
+      "id": 10,
+      "title": "Worker Heartbeat Freshness",
+      "type": "stat",
+      "gridPos": {"h": 5, "w": 8, "x": 16, "y": 22},
+      "datasource": {"type": "prometheus", "uid": "PBFA97CFB590B2093"},
+      "targets": [
+        {
+          "expr": "time() - modelforge_worker_heartbeat_timestamp_seconds",
+          "legendFormat": "Seconds Since Heartbeat",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "green", "value": null},
+              {"color": "yellow", "value": 30},
+              {"color": "red", "value": 60}
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 11,
+      "title": "Retraining Job Outcomes",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 27},
+      "datasource": {"type": "prometheus", "uid": "PBFA97CFB590B2093"},
+      "targets": [
+        {
+          "expr": "modelforge_retraining_jobs_total",
+          "legendFormat": "{{status}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {"unit": "short"},
+        "overrides": []
+      }
+    },
+    {
+      "id": 12,
+      "title": "Retraining Execution Duration",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 27},
+      "datasource": {"type": "prometheus", "uid": "PBFA97CFB590B2093"},
+      "targets": [
+        {
+          "expr": "rate(modelforge_retraining_execution_duration_seconds_sum[5m]) / rate(modelforge_retraining_execution_duration_seconds_count[5m])",
+          "legendFormat": "Average Duration",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(modelforge_retraining_execution_duration_seconds_bucket[5m])) by (le))",
+          "legendFormat": "P95 Duration",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "spanNulls": true
+          }
+        },
         "overrides": []
       }
     }
