@@ -162,3 +162,109 @@ def test_retraining_job_timeout_validation(monkeypatch):
     monkeypatch.setenv("MODELFORGE_RETRAINING_JOB_TIMEOUT_SECONDS", "-5.0")
     with pytest.raises(ValidationError):
         Settings(_env_file=None)
+
+
+def test_api_keys_default_empty(monkeypatch):
+    """Verify api_keys defaults to an empty tuple when unconfigured."""
+    monkeypatch.delenv("MODELFORGE_API_KEYS", raising=False)
+    config = Settings(_env_file=None)
+    assert config.api_keys == ()
+
+
+def test_api_keys_read_valid_environment_variables(monkeypatch):
+    """Verify parsing multiple API client credentials from environment variables."""
+    payload = (
+        '[{"client_id": "c1", "token": "secret-1", "roles": ["predict"]}, '
+        '{"client_id": "c2", "token": "secret-2", "roles": ["monitoring", "admin"]}]'
+    )
+    monkeypatch.setenv("MODELFORGE_API_KEYS", payload)
+    config = Settings(_env_file=None)
+
+    assert len(config.api_keys) == 2
+    assert config.api_keys[0].client_id == "c1"
+    assert config.api_keys[0].roles == ("predict",)
+    assert config.api_keys[0].token.get_secret_value() == "secret-1"
+
+    assert config.api_keys[1].client_id == "c2"
+    assert config.api_keys[1].roles == ("monitoring", "admin")
+    assert config.api_keys[1].token.get_secret_value() == "secret-2"
+
+
+def test_api_keys_reject_duplicate_client_id(monkeypatch):
+    """Verify configuration rejects duplicate client IDs."""
+    payload = (
+        '[{"client_id": "dupe", "token": "secret-1", "roles": ["predict"]}, '
+        '{"client_id": "dupe", "token": "secret-2", "roles": ["audit"]}]'
+    )
+    monkeypatch.setenv("MODELFORGE_API_KEYS", payload)
+    with pytest.raises(ValidationError) as exc_info:
+        Settings(_env_file=None)
+    assert "Duplicate client_id" in str(exc_info.value)
+
+
+def test_api_keys_reject_duplicate_tokens(monkeypatch):
+    """Verify configuration rejects duplicate tokens across clients."""
+    payload = (
+        '[{"client_id": "c1", "token": "shared-token", "roles": ["predict"]}, '
+        '{"client_id": "c2", "token": "shared-token", "roles": ["audit"]}]'
+    )
+    monkeypatch.setenv("MODELFORGE_API_KEYS", payload)
+    with pytest.raises(ValidationError) as exc_info:
+        Settings(_env_file=None)
+    assert "Duplicate token detected" in str(exc_info.value)
+
+
+def test_api_keys_reject_invalid_role(monkeypatch):
+    """Verify configuration rejects unrecognized role names."""
+    payload = '[{"client_id": "c1", "token": "secret-1", "roles": ["invalid_role"]}]'
+    monkeypatch.setenv("MODELFORGE_API_KEYS", payload)
+    with pytest.raises(ValidationError) as exc_info:
+        Settings(_env_file=None)
+    assert "Invalid role" in str(exc_info.value)
+
+
+def test_api_keys_reject_empty_roles(monkeypatch):
+    """Verify configuration rejects client with empty roles list."""
+    payload = '[{"client_id": "c1", "token": "secret-1", "roles": []}]'
+    monkeypatch.setenv("MODELFORGE_API_KEYS", payload)
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None)
+
+
+def test_api_keys_reject_empty_client_id(monkeypatch):
+    """Verify configuration rejects client with empty or whitespace client_id."""
+    payload = '[{"client_id": "   ", "token": "secret-1", "roles": ["predict"]}]'
+    monkeypatch.setenv("MODELFORGE_API_KEYS", payload)
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None)
+
+
+def test_api_keys_reject_empty_token(monkeypatch):
+    """Verify configuration rejects client with empty or whitespace token."""
+    payload = '[{"client_id": "c1", "token": "   ", "roles": ["predict"]}]'
+    monkeypatch.setenv("MODELFORGE_API_KEYS", payload)
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None)
+
+
+def test_api_keys_reject_malformed_json(monkeypatch):
+    """Verify configuration rejects non-JSON or malformed credential strings."""
+    monkeypatch.setenv("MODELFORGE_API_KEYS", "not-a-valid-json-string")
+    with pytest.raises(Exception):
+        Settings(_env_file=None)
+
+
+def test_api_keys_secrets_not_exposed_in_representations(monkeypatch):
+    """Verify secret tokens are masked in __repr__ and validation error messages."""
+    secret = "my-ultra-secret-token-value-xyz"
+    payload = f'[{{"client_id": "c1", "token": "{secret}", "roles": ["predict"]}}]'
+    monkeypatch.setenv("MODELFORGE_API_KEYS", payload)
+    config = Settings(_env_file=None)
+
+    repr_str = repr(config)
+    assert secret not in repr_str
+    assert "**********" in repr_str
+
+    client_repr = repr(config.api_keys[0])
+    assert secret not in client_repr
+    assert "**********" in client_repr
