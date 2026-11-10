@@ -5,11 +5,48 @@ from unittest.mock import patch
 import pandas as pd
 import pytest
 from fastapi.testclient import TestClient
+from pydantic import SecretStr
 
 from backend.app.api import api as api_module
+from backend.app.config import ClientApiKeyConfig
 from backend.app.ml.audit import record_promotion_audit
 
 app = api_module.app
+
+TEST_PREDICT_TOKEN = "test-api-predict-token-101"
+TEST_MONITORING_TOKEN = "test-api-monitoring-token-202"
+TEST_AUDIT_TOKEN = "test-api-audit-token-303"
+
+TEST_API_KEYS = (
+    ClientApiKeyConfig(
+        client_id="test-api-predict-client",
+        token=SecretStr(TEST_PREDICT_TOKEN),
+        roles=("predict",),
+    ),
+    ClientApiKeyConfig(
+        client_id="test-api-monitoring-client",
+        token=SecretStr(TEST_MONITORING_TOKEN),
+        roles=("monitoring",),
+    ),
+    ClientApiKeyConfig(
+        client_id="test-api-audit-client",
+        token=SecretStr(TEST_AUDIT_TOKEN),
+        roles=("audit",),
+    ),
+)
+
+PREDICT_AUTH_HEADERS = {"Authorization": f"Bearer {TEST_PREDICT_TOKEN}"}
+MONITORING_AUTH_HEADERS = {"Authorization": f"Bearer {TEST_MONITORING_TOKEN}"}
+AUDIT_AUTH_HEADERS = {"Authorization": f"Bearer {TEST_AUDIT_TOKEN}"}
+
+
+@pytest.fixture(autouse=True)
+def configure_test_api_keys(monkeypatch):
+    """Configure synthetic test-only API keys for API functional tests."""
+    monkeypatch.setattr(
+        "backend.app.api.security.settings.api_keys",
+        TEST_API_KEYS,
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -53,6 +90,7 @@ def test_predict_endpoint(mock_load_model):
     with TestClient(app) as client:
         response = client.post(
             "/predict",
+            headers=PREDICT_AUTH_HEADERS,
             json={
                 "age": 35,
                 "tenure": 24,
@@ -77,6 +115,7 @@ def test_predict_rejects_invalid_age(mock_load_model):
     with TestClient(app) as client:
         response = client.post(
             "/predict",
+            headers=PREDICT_AUTH_HEADERS,
             json={
                 "age": 17,
                 "tenure": 24,
@@ -137,6 +176,7 @@ def test_predict_returns_503_when_model_prediction_fails():
         with TestClient(app) as client:
             response = client.post(
                 "/predict",
+                headers=PREDICT_AUTH_HEADERS,
                 json={
                     "age": 35,
                     "tenure": 12,
@@ -201,6 +241,7 @@ def test_prediction_failure_is_logged(caplog):
             ):
                 response = client.post(
                     "/predict",
+                    headers=PREDICT_AUTH_HEADERS,
                     json={
                         "age": 35,
                         "tenure": 12,
@@ -230,6 +271,7 @@ def test_predict_returns_503_when_model_is_missing(caplog):
             ):
                 response = client.post(
                     "/predict",
+                    headers=PREDICT_AUTH_HEADERS,
                     json={
                         "age": 35,
                         "tenure": 12,
@@ -261,6 +303,7 @@ def test_predict_returns_503_for_invalid_model_output(model_output):
         with TestClient(app) as client:
             response = client.post(
                 "/predict",
+                headers=PREDICT_AUTH_HEADERS,
                 json={
                     "age": 35,
                     "tenure": 12,
@@ -304,6 +347,7 @@ def test_metrics_endpoint_tracks_successful_prediction():
         with TestClient(app) as client:
             prediction_response = client.post(
                 "/predict",
+                headers=PREDICT_AUTH_HEADERS,
                 json={
                     "age": 35,
                     "tenure": 24,
@@ -332,6 +376,7 @@ def test_metrics_endpoint_tracks_failed_prediction():
         with TestClient(app) as client:
             prediction_response = client.post(
                 "/predict",
+                headers=PREDICT_AUTH_HEADERS,
                 json={
                     "age": 35,
                     "tenure": 24,
@@ -360,6 +405,7 @@ def test_metrics_endpoint_tracks_prediction_latency():
         with TestClient(app) as client:
             prediction_response = client.post(
                 "/predict",
+                headers=PREDICT_AUTH_HEADERS,
                 json={
                     "age": 35,
                     "tenure": 24,
@@ -389,6 +435,7 @@ def test_metrics_endpoint_tracks_latency_when_prediction_fails():
         with TestClient(app) as client:
             prediction_response = client.post(
                 "/predict",
+                headers=PREDICT_AUTH_HEADERS,
                 json={
                     "age": 35,
                     "tenure": 24,
@@ -415,6 +462,7 @@ def test_metrics_endpoint_tracks_latency_when_model_is_missing():
             app.state.churn_model = None
             prediction_response = client.post(
                 "/predict",
+                headers=PREDICT_AUTH_HEADERS,
                 json={
                     "age": 35,
                     "tenure": 24,
@@ -443,6 +491,7 @@ def test_metrics_endpoint_reports_average_prediction_latency():
             for _ in range(2):
                 response = client.post(
                     "/predict",
+                    headers=PREDICT_AUTH_HEADERS,
                     json={
                         "age": 35,
                         "tenure": 24,
@@ -474,6 +523,7 @@ def test_metrics_endpoint_reports_latency_percentiles():
             for _ in range(3):
                 response = client.post(
                     "/predict",
+                    headers=PREDICT_AUTH_HEADERS,
                     json={
                         "age": 35,
                         "tenure": 24,
@@ -557,6 +607,7 @@ def test_drift_endpoint_returns_report(mock_load_model, tmp_path):
     ):
         response = client.post(
             "/monitoring/drift",
+            headers=MONITORING_AUTH_HEADERS,
             json={"records": records},
         )
 
@@ -600,6 +651,7 @@ def test_drift_endpoint_reports_insufficient_data(mock_load_model, tmp_path):
     ):
         response = client.post(
             "/monitoring/drift",
+            headers=MONITORING_AUTH_HEADERS,
             json={"records": records},
         )
 
@@ -639,6 +691,7 @@ def test_drift_endpoint_returns_503_when_reference_is_missing(
     ):
         response = client.post(
             "/monitoring/drift",
+            headers=MONITORING_AUTH_HEADERS,
             json={"records": records},
         )
 
@@ -656,6 +709,7 @@ def test_drift_endpoint_rejects_empty_batch(mock_load_model):
     with TestClient(app) as client:
         response = client.post(
             "/monitoring/drift",
+            headers=MONITORING_AUTH_HEADERS,
             json={"records": []},
         )
 
@@ -670,6 +724,7 @@ def test_drift_endpoint_rejects_invalid_record(mock_load_model):
     with TestClient(app) as client:
         response = client.post(
             "/monitoring/drift",
+            headers=MONITORING_AUTH_HEADERS,
             json={
                 "records": [
                     {
@@ -716,6 +771,7 @@ def test_drift_endpoint_returns_503_when_reference_is_invalid(
     ):
         response = client.post(
             "/monitoring/drift",
+            headers=MONITORING_AUTH_HEADERS,
             json={"records": records},
         )
 
@@ -739,7 +795,10 @@ def test_audit_promotions_missing_database_returns_empty_list(
         ),
         TestClient(app) as client,
     ):
-        response = client.get("/audit/promotions")
+        response = client.get(
+            "/audit/promotions",
+            headers=AUDIT_AUTH_HEADERS,
+        )
 
     assert response.status_code == 200
     assert response.json() == []
@@ -760,7 +819,10 @@ def test_audit_promotions_missing_table_returns_empty_list(mock_load_model, tmp_
         ),
         TestClient(app) as client,
     ):
-        response = client.get("/audit/promotions")
+        response = client.get(
+            "/audit/promotions",
+            headers=AUDIT_AUTH_HEADERS,
+        )
 
     assert response.status_code == 200
     assert response.json() == []
@@ -819,7 +881,10 @@ def test_audit_promotions_populated_database_returns_correct_fields_and_payload(
         ),
         TestClient(app) as client,
     ):
-        response = client.get("/audit/promotions")
+        response = client.get(
+            "/audit/promotions",
+            headers=AUDIT_AUTH_HEADERS,
+        )
 
     assert response.status_code == 200
     data = response.json()
@@ -885,7 +950,10 @@ def test_audit_promotions_ordered_newest_first(mock_load_model, tmp_path):
         ),
         TestClient(app) as client,
     ):
-        response = client.get("/audit/promotions")
+        response = client.get(
+            "/audit/promotions",
+            headers=AUDIT_AUTH_HEADERS,
+        )
 
     assert response.status_code == 200
     returned_timestamps = [r["timestamp"] for r in response.json()]
@@ -923,12 +991,18 @@ def test_audit_promotions_limit_restricts_count(mock_load_model, tmp_path):
         TestClient(app) as client,
     ):
         # Default limit is 10
-        resp_default = client.get("/audit/promotions")
+        resp_default = client.get(
+            "/audit/promotions",
+            headers=AUDIT_AUTH_HEADERS,
+        )
         assert resp_default.status_code == 200
         assert len(resp_default.json()) == 10
 
         # Custom limit = 3
-        resp_3 = client.get("/audit/promotions?limit=3")
+        resp_3 = client.get(
+            "/audit/promotions?limit=3",
+            headers=AUDIT_AUTH_HEADERS,
+        )
         assert resp_3.status_code == 200
         records_3 = resp_3.json()
         assert len(records_3) == 3
@@ -947,7 +1021,10 @@ def test_audit_promotions_invalid_limit_returns_422(mock_load_model, invalid_lim
     mock_load_model.return_value.predict.return_value = [0]
 
     with TestClient(app) as client:
-        response = client.get(f"/audit/promotions?limit={invalid_limit}")
+        response = client.get(
+            f"/audit/promotions?limit={invalid_limit}",
+            headers=AUDIT_AUTH_HEADERS,
+        )
 
     assert response.status_code == 422
 
@@ -989,7 +1066,10 @@ def test_audit_promotions_uses_configured_db_path(mock_load_model, tmp_path):
         ),
         TestClient(app) as client,
     ):
-        response = client.get("/audit/promotions")
+        response = client.get(
+            "/audit/promotions",
+            headers=AUDIT_AUTH_HEADERS,
+        )
 
     assert response.status_code == 200
     records = response.json()
@@ -1031,7 +1111,10 @@ def test_audit_promotions_does_not_call_mlflow_or_mutate_aliases(
             patch("mlflow.client.MlflowClient") as mock_client,
             patch("mlflow.set_tracking_uri") as mock_set_tracking_uri,
         ):
-            response = client.get("/audit/promotions")
+            response = client.get(
+                "/audit/promotions",
+                headers=AUDIT_AUTH_HEADERS,
+            )
 
             assert response.status_code == 200
             assert len(response.json()) == 1
@@ -1058,7 +1141,10 @@ def test_audit_promotions_corrupted_database_returns_503(
         TestClient(app) as client,
     ):
         with caplog.at_level(logging.ERROR, logger="backend.app.api.api"):
-            response = client.get("/audit/promotions")
+            response = client.get(
+                "/audit/promotions",
+                headers=AUDIT_AUTH_HEADERS,
+            )
 
     assert response.status_code == 503
     assert response.json() == {"detail": "The promotion audit service is unavailable."}
@@ -1148,7 +1234,11 @@ def test_drift_endpoint_unchanged_does_not_queue_job(mock_load_model, tmp_path):
         patch("backend.app.api.api.settings.lifecycle_audit_db_path", str(db_path)),
         TestClient(app) as client,
     ):
-        response = client.post("/monitoring/drift", json={"records": records})
+        response = client.post(
+            "/monitoring/drift",
+            headers=MONITORING_AUTH_HEADERS,
+            json={"records": records},
+        )
 
     assert response.status_code == 200
     data = response.json()
@@ -1197,7 +1287,11 @@ def test_drift_assess_queues_job_when_drift_detected(mock_load_model, tmp_path):
         patch("backend.app.api.api.settings.lifecycle_audit_db_path", str(db_path)),
         TestClient(app) as client,
     ):
-        response = client.post("/monitoring/drift/assess", json=payload)
+        response = client.post(
+            "/monitoring/drift/assess",
+            headers=MONITORING_AUTH_HEADERS,
+            json=payload,
+        )
 
     assert response.status_code == 200
     data = response.json()
@@ -1260,7 +1354,11 @@ def test_drift_assess_insufficient_data(mock_load_model, tmp_path):
         patch("backend.app.api.api.settings.lifecycle_audit_db_path", str(db_path)),
         TestClient(app) as client,
     ):
-        response = client.post("/monitoring/drift/assess", json=payload)
+        response = client.post(
+            "/monitoring/drift/assess",
+            headers=MONITORING_AUTH_HEADERS,
+            json=payload,
+        )
 
     assert response.status_code == 200
     data = response.json()
@@ -1315,7 +1413,11 @@ def test_drift_assess_stable_no_drift(mock_load_model, tmp_path):
         patch("backend.app.api.api.settings.lifecycle_audit_db_path", str(db_path)),
         TestClient(app) as client,
     ):
-        response = client.post("/monitoring/drift/assess", json=payload)
+        response = client.post(
+            "/monitoring/drift/assess",
+            headers=MONITORING_AUTH_HEADERS,
+            json=payload,
+        )
 
     assert response.status_code == 200
     data = response.json()
@@ -1380,7 +1482,11 @@ def test_drift_assess_active_job_exists(mock_load_model, tmp_path):
         patch("backend.app.api.api.settings.lifecycle_audit_db_path", str(db_path)),
         TestClient(app) as client,
     ):
-        response = client.post("/monitoring/drift/assess", json=payload)
+        response = client.post(
+            "/monitoring/drift/assess",
+            headers=MONITORING_AUTH_HEADERS,
+            json=payload,
+        )
 
     assert response.status_code == 409
     data = response.json()
@@ -1460,7 +1566,11 @@ def test_drift_assess_cooldown_active(mock_load_model, tmp_path):
         patch("backend.app.api.api.settings.lifecycle_audit_db_path", str(db_path)),
         TestClient(app) as client,
     ):
-        response = client.post("/monitoring/drift/assess", json=payload)
+        response = client.post(
+            "/monitoring/drift/assess",
+            headers=MONITORING_AUTH_HEADERS,
+            json=payload,
+        )
 
     assert response.status_code == 200
     data = response.json()
@@ -1560,7 +1670,11 @@ def test_drift_assess_failed_and_rejected_jobs_do_not_extend_cooldown(
         patch("backend.app.api.api.settings.lifecycle_audit_db_path", str(db_path)),
         TestClient(app) as client,
     ):
-        response = client.post("/monitoring/drift/assess", json=payload)
+        response = client.post(
+            "/monitoring/drift/assess",
+            headers=MONITORING_AUTH_HEADERS,
+            json=payload,
+        )
 
     assert response.status_code == 200
     data = response.json()
@@ -1579,6 +1693,7 @@ def test_drift_assess_rejects_invalid_inputs(mock_load_model):
         # Missing dataset_id
         res1 = client.post(
             "/monitoring/drift/assess",
+            headers=MONITORING_AUTH_HEADERS,
             json={
                 "records": [
                     {
@@ -1596,6 +1711,7 @@ def test_drift_assess_rejects_invalid_inputs(mock_load_model):
         # Empty records
         res2 = client.post(
             "/monitoring/drift/assess",
+            headers=MONITORING_AUTH_HEADERS,
             json={
                 "records": [],
                 "dataset_id": "ds-1",
@@ -1606,6 +1722,7 @@ def test_drift_assess_rejects_invalid_inputs(mock_load_model):
         # Empty dataset_id string
         res3 = client.post(
             "/monitoring/drift/assess",
+            headers=MONITORING_AUTH_HEADERS,
             json={
                 "records": [
                     {
@@ -1662,7 +1779,11 @@ def test_drift_assess_does_not_trigger_sync_training_or_promotion(
         patch("backend.app.ml.promotion.promote_model") as mock_promote,
         TestClient(app) as client,
     ):
-        response = client.post("/monitoring/drift/assess", json=payload)
+        response = client.post(
+            "/monitoring/drift/assess",
+            headers=MONITORING_AUTH_HEADERS,
+            json=payload,
+        )
 
     assert response.status_code == 200
     assert response.json()["status"] == "queued"

@@ -1,8 +1,10 @@
 import logging
 import secrets
+from collections.abc import Callable
 from dataclasses import dataclass
+from typing import Annotated
 
-from fastapi import HTTPException, Request, Security, status
+from fastapi import Depends, HTTPException, Request, Security, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.security.api_key import APIKeyHeader
 
@@ -170,3 +172,31 @@ def get_current_client(
         request.url.path,
     )
     return authenticated_client
+
+
+def require_role(role_name: str) -> Callable[..., AuthenticatedClient]:
+    """Return a FastAPI dependency enforcing the required role or admin access."""
+    clean_role = role_name.strip()
+    if not clean_role:
+        raise ValueError("role_name must not be empty.")
+
+    def _require_role(
+        request: Request,
+        client: Annotated[AuthenticatedClient, Depends(get_current_client)],
+    ) -> AuthenticatedClient:
+        if not client.has_role(clean_role):
+            client_ip = request.client.host if request.client else "unknown"
+            logger.warning(
+                "authz_failed client_id=%s required_role=%s client_ip=%s path=%s",
+                client.client_id,
+                clean_role,
+                client_ip,
+                request.url.path,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Insufficient permissions.",
+            )
+        return client
+
+    return _require_role

@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Annotated
 
 import pandas as pd
-from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 from prometheus_client import CONTENT_TYPE_LATEST
 from starlette.responses import Response
@@ -20,6 +20,7 @@ from backend.app.api.schemas import (
     PromotionAuditRecord,
     RetrainingJobResponse,
 )
+from backend.app.api.security import require_role
 from backend.app.config import settings
 from backend.app.ml.audit import AuditDatabaseError, get_promotion_audit_records
 from backend.app.ml.drift import detect_data_drift
@@ -246,7 +247,7 @@ def prometheus_metrics(request: Request) -> Response:
     )
 
 
-@app.post("/predict")
+@app.post("/predict", dependencies=[Depends(require_role("predict"))])
 def predict_churn(
     request: ChurnPredictionRequest,
     api_request: Request,
@@ -302,7 +303,7 @@ def predict_churn(
         api_request.app.state.prediction_latency_samples.append(elapsed)
 
 
-@app.post("/monitoring/drift")
+@app.post("/monitoring/drift", dependencies=[Depends(require_role("monitoring"))])
 def monitor_data_drift(
     batch: DriftBatchRequest,
     api_request: Request,
@@ -363,6 +364,7 @@ def monitor_data_drift(
     "/monitoring/drift/assess",
     response_model=DriftAssessmentResponse,
     status_code=200,
+    dependencies=[Depends(require_role("monitoring"))],
     responses={
         409: {
             "model": DriftAssessmentResponse,
@@ -471,6 +473,7 @@ def drift_assess_and_queue(
 @app.get(
     "/audit/promotions",
     response_model=list[PromotionAuditRecord],
+    dependencies=[Depends(require_role("audit"))],
 )
 def get_promotion_audits(
     limit: Annotated[int, Query(ge=1, le=100)] = 10,
@@ -495,6 +498,7 @@ def get_promotion_audits(
     "/retraining/jobs/active",
     response_model=ActiveJobResponse,
     status_code=200,
+    dependencies=[Depends(require_role("retraining"))],
     responses={
         503: {
             "description": "Retraining job service unavailable.",
@@ -531,6 +535,7 @@ def get_active_retraining_job() -> ActiveJobResponse:
     "/retraining/jobs/{job_id}",
     response_model=RetrainingJobResponse,
     status_code=200,
+    dependencies=[Depends(require_role("retraining"))],
     responses={
         404: {
             "description": "Retraining job not found.",
