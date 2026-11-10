@@ -268,3 +268,50 @@ def test_api_keys_secrets_not_exposed_in_representations(monkeypatch):
     client_repr = repr(config.api_keys[0])
     assert secret not in client_repr
     assert "**********" in client_repr
+
+
+def test_rate_limit_settings_defaults(monkeypatch):
+    """Verify default values for process-local rate limiting configuration."""
+    monkeypatch.delenv("MODELFORGE_RATE_LIMIT_ENABLED", raising=False)
+    monkeypatch.delenv("MODELFORGE_RATE_LIMIT_REQUESTS_PER_MINUTE", raising=False)
+    monkeypatch.delenv("MODELFORGE_RATE_LIMIT_WINDOW_SECONDS", raising=False)
+
+    config = Settings(_env_file=None)
+
+    assert config.rate_limit_enabled is True
+    assert config.rate_limit_requests_per_minute == 60
+    assert config.rate_limit_window_seconds == 60
+
+
+def test_rate_limit_settings_overrides(monkeypatch):
+    """Verify environment variable overrides and explicit disabling."""
+    monkeypatch.setenv("MODELFORGE_RATE_LIMIT_ENABLED", "false")
+    monkeypatch.setenv("MODELFORGE_RATE_LIMIT_REQUESTS_PER_MINUTE", "120")
+    monkeypatch.setenv("MODELFORGE_RATE_LIMIT_WINDOW_SECONDS", "30")
+
+    config = Settings(_env_file=None)
+
+    assert config.rate_limit_enabled is False
+    assert config.rate_limit_requests_per_minute == 120
+    assert config.rate_limit_window_seconds == 30
+
+
+@pytest.mark.parametrize(
+    ("env_var", "invalid_value"),
+    [
+        ("MODELFORGE_RATE_LIMIT_ENABLED", "maybe"),
+        ("MODELFORGE_RATE_LIMIT_REQUESTS_PER_MINUTE", "0"),
+        ("MODELFORGE_RATE_LIMIT_REQUESTS_PER_MINUTE", "-5"),
+        ("MODELFORGE_RATE_LIMIT_REQUESTS_PER_MINUTE", "abc"),
+        ("MODELFORGE_RATE_LIMIT_REQUESTS_PER_MINUTE", "10.5"),
+        ("MODELFORGE_RATE_LIMIT_WINDOW_SECONDS", "0"),
+        ("MODELFORGE_RATE_LIMIT_WINDOW_SECONDS", "-10"),
+        ("MODELFORGE_RATE_LIMIT_WINDOW_SECONDS", "not-an-int"),
+        ("MODELFORGE_RATE_LIMIT_WINDOW_SECONDS", "1.5"),
+    ],
+)
+def test_rate_limit_settings_reject_invalid_values(monkeypatch, env_var, invalid_value):
+    """Verify invalid rate-limit settings raise ValidationError and fail fast."""
+    monkeypatch.setenv(env_var, invalid_value)
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None)

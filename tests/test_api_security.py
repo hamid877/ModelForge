@@ -1,5 +1,7 @@
 import json
 import secrets
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import FrozenInstanceError
 from unittest.mock import patch
 
@@ -12,6 +14,7 @@ from pydantic import SecretStr, ValidationError
 from backend.app.api import api as api_module
 from backend.app.api.security import (
     AuthenticatedClient,
+    SlidingWindowRateLimiter,
     authenticate_token,
     get_current_client,
     require_role,
@@ -767,3 +770,502 @@ def test_openapi_security_schemes_and_route_requirements():
         assert token not in schema_text
     assert "dev-predict-token" not in schema_text
     assert "dev-admin-token" not in schema_text
+
+
+# ---------------------------------------------------------------------------
+# Phase 3: Rate Limiting Unit & Integration Tests
+# ---------------------------------------------------------------------------
+
+
+class FakeClock:
+    """Deterministic controllable clock for sliding-window rate-limiter tests."""
+
+    def __init__(self, initial: float = 1000.0) -> None:
+        self._now = float(initial)
+        self._lock = threading.Lock()
+
+    def __call__(self) -> float:
+        with self._lock:
+            return self._now
+
+    def advance(self, seconds: float) -> float:
+        with self._lock:
+            self._now += seconds
+            return self._now
+
+    def set(self, timestamp: float) -> float:
+        with self._lock:
+            self._now = float(timestamp)
+            return self._now
+
+
+@pytest.fixture
+def rate_limit_env(rbac_env, monkeypatch):
+    """Isolate rate-limit settings and inject a deterministic FakeClock per test."""
+    clock = FakeClock(initial=1000.0)
+    monkeypatch.setattr(api_module.settings, "rate_limit_enabled", True)
+    monkeypatch.setattr(api_module.settings, "rate_limit_requests_per_minute", 3)
+    monkeypatch.setattr(api_module.settings, "rate_limit_window_seconds", 60)
+
+    limiter = SlidingWindowRateLimiter(
+        max_requests=3,
+        window_seconds=60,
+        clock=clock,
+    )
+    api_module.app.state.rate_limiter = limiter
+
+    return {
+        **rbac_env,
+        "clock": clock,
+        "limiter": limiter,
+    }
+
+
+def test_rate_limiter_rejects_invalid_constructor_args():
+    """Verify SlidingWindowRateLimiter validates limits, windows, and client IDs."""
+    with pytest.raises(ValueError, match="max_requests"):
+        SlidingWindowRateLimiter(max_requests=0, window_seconds=60)
+    with pytest.raises(ValueError, match="max_requests"):
+        SlidingWindowRateLimiter(max_requests=-3, window_seconds=60)
+    with pytest.raises(ValueError, match="max_requests"):
+        SlidingWindowRateLimiter(max_requests=True, window_seconds=60)  # type: ignore[arg-type]
+
+    with pytest.raises(ValueError, match="window_seconds"):
+        SlidingWindowRateLimiter(max_requests=5, window_seconds=0)
+    with pytest.raises(ValueError, match="window_seconds"):
+        SlidingWindowRateLimiter(max_requests=5, window_seconds=-10)
+    with pytest.raises(ValueError, match="window_seconds"):
+        SlidingWindowRateLimiter(max_requests=5, window_seconds=float("inf"))
+
+    with pytest.raises(ValueError, match="cleanup_interval_seconds"):
+        SlidingWindowRateLimiter(
+            max_requests=5,
+            window_seconds=60,
+            cleanup_interval_seconds=0,
+        )
+
+    limiter = SlidingWindowRateLimiter(max_requests=2, window_seconds=60)
+    with pytest.raises(ValueError, match="client_id"):
+        limiter.check_rate_limit("   ")
+
+
+def test_rate_limiter_allows_within_limit_and_blocks_exceeding():
+    """Verify requests within limit succeed and the next request returns blocked."""
+    clock = FakeClock(100.0)
+    limiter = SlidingWindowRateLimiter(max_requests=3, window_seconds=60, clock=clock)
+
+    for expected_remaining in (2, 1, 0):
+        decision = limiter.check_rate_limit("client-a")
+        assert decision.allowed is True
+        assert decision.retry_after_seconds == 0
+        assert decision.remaining == expected_remaining
+        assert decision.limit == 3
+
+    blocked = limiter.check_rate_limit("client-a")
+    assert blocked.allowed is False
+    assert blocked.retry_after_seconds == 60
+    assert blocked.remaining == 0
+    assert blocked.limit == 3
+
+
+def test_rate_limiter_retry_after_boundary_and_oldest_expiration():
+    """Verify exact Retry-After calculation from oldest blocking entry & boundaries."""
+    clock = FakeClock(100.0)
+    limiter = SlidingWindowRateLimiter(max_requests=2, window_seconds=60, clock=clock)
+
+    # First accepted at t=100.0, second at t=125.0
+    assert limiter.check_rate_limit("client-a").allowed is True
+    clock.set(125.0)
+    assert limiter.check_rate_limit("client-a").allowed is True
+
+    # Blocked at t=130.0: oldest is t=100.0, expires at t=160.0 -> Retry-After = 30
+    clock.set(130.0)
+    blocked_1 = limiter.check_rate_limit("client-a")
+    assert blocked_1.allowed is False
+    assert blocked_1.retry_after_seconds == 30
+
+    # Just before expiration at t=159.999 -> still blocked, Retry-After >= 1 (never 0)
+    clock.set(159.999)
+    blocked_2 = limiter.check_rate_limit("client-a")
+    assert blocked_2.allowed is False
+    assert isinstance(blocked_2.retry_after_seconds, int)
+    assert blocked_2.retry_after_seconds == 1
+
+    # Exactly at expiration t=160.0 -> oldest (100.0) expires, request succeeds!
+    clock.set(160.0)
+    allowed_after = limiter.check_rate_limit("client-a")
+    assert allowed_after.allowed is True
+    assert allowed_after.remaining == 0
+
+    # Immediate next request at t=160.0 is blocked by t=125.0 (expires at t=185.0)
+    blocked_3 = limiter.check_rate_limit("client-a")
+    assert blocked_3.allowed is False
+    assert blocked_3.retry_after_seconds == 25
+
+
+def test_rate_limiter_prunes_expired_entries_and_cleans_inactive_clients():
+    """Verify expired timestamps are pruned and inactive clients are removed."""
+    clock = FakeClock(0.0)
+    limiter = SlidingWindowRateLimiter(
+        max_requests=3,
+        window_seconds=60,
+        clock=clock,
+        cleanup_interval_seconds=60,
+    )
+
+    # Client A makes 2 requests at t=0 and t=10; Client B makes 1 request at t=50
+    limiter.check_rate_limit("client-a")
+    clock.set(10.0)
+    limiter.check_rate_limit("client-a")
+    assert limiter.client_request_count("client-a") == 2
+
+    clock.set(50.0)
+    limiter.check_rate_limit("client-b")
+    assert limiter.tracked_client_count() == 2
+
+    # Advance to t=70: client-a's entries (t=0, t=10) expired; client-b (t=50) active
+    clock.set(70.0)
+    # Periodic sweep runs on next check_rate_limit (since 70 - 0 >= 60)
+    limiter.check_rate_limit("client-b")
+
+    assert limiter.client_request_count("client-a") == 0
+    assert limiter.tracked_client_count() == 1
+    assert limiter.client_request_count("client-b") == 2
+
+    # Advance past client-b's window and run explicit cleanup
+    clock.set(140.0)
+    removed = limiter.cleanup()
+    assert removed == 1
+    assert limiter.tracked_client_count() == 0
+
+
+def test_rate_limiter_thread_safety_under_concurrency():
+    """Concurrent requests cannot exceed the configured limit due to race conditions."""
+    clock = FakeClock(500.0)
+    max_requests = 5
+    total_threads = 25
+    limiter = SlidingWindowRateLimiter(
+        max_requests=max_requests,
+        window_seconds=60,
+        clock=clock,
+    )
+    barrier = threading.Barrier(total_threads)
+
+    def _worker() -> bool:
+        barrier.wait(timeout=5.0)
+        return limiter.check_rate_limit("concurrent-client").allowed
+
+    with ThreadPoolExecutor(max_workers=total_threads) as pool:
+        results = list(pool.map(lambda _: _worker(), range(total_threads)))
+
+    assert sum(1 for allowed in results if allowed) == max_requests
+    assert sum(1 for allowed in results if not allowed) == (
+        total_threads - max_requests
+    )
+    assert limiter.client_request_count("concurrent-client") == max_requests
+
+
+def test_api_requests_within_limit_succeed_and_exceeding_returns_429(rate_limit_env):
+    """Requests within limit succeed; exceeding returns 429 with Retry-After."""
+    client = rate_limit_env["client"]
+    headers = {"Authorization": f"Bearer {TEST_PREDICT_TOKEN}"}
+    payload = _sample_customer_record()
+
+    for _ in range(3):
+        resp = client.post("/predict", headers=headers, json=payload)
+        assert resp.status_code == 200
+
+    blocked = client.post("/predict", headers=headers, json=payload)
+    assert blocked.status_code == 429
+    assert blocked.json() == {"detail": "Rate limit exceeded. Try again later."}
+    retry_after = blocked.headers.get("Retry-After")
+    assert retry_after is not None
+    assert retry_after.isdigit()
+    assert int(retry_after) == 60
+
+
+def test_api_requests_succeed_after_window_expires(rate_limit_env):
+    """Requests succeed again once the oldest timestamp expires from the window."""
+    client = rate_limit_env["client"]
+    clock: FakeClock = rate_limit_env["clock"]
+    headers = {"Authorization": f"Bearer {TEST_AUDIT_TOKEN}"}
+
+    for i in range(3):
+        clock.set(1000.0 + i * 10.0)
+        resp = client.get("/audit/promotions", headers=headers)
+        assert resp.status_code == 200
+
+    # At t=1025.0, oldest request (t=1000.0) expires at t=1060.0 -> Retry-After=35
+    clock.set(1025.0)
+    blocked = client.get("/audit/promotions", headers=headers)
+    assert blocked.status_code == 429
+    assert blocked.headers.get("Retry-After") == "35"
+
+    # At t=1059.5, still blocked with Retry-After=1
+    clock.set(1059.5)
+    still_blocked = client.get("/audit/promotions", headers=headers)
+    assert still_blocked.status_code == 429
+    assert still_blocked.headers.get("Retry-After") == "1"
+
+    # At t=1060.0, t=1000.0 expires and request succeeds
+    clock.set(1060.0)
+    recovered = client.get("/audit/promotions", headers=headers)
+    assert recovered.status_code == 200
+
+
+def test_api_different_clients_have_independent_quotas(rate_limit_env):
+    """Exhausting one client's quota does not affect another authenticated client."""
+    client = rate_limit_env["client"]
+
+    # Exhaust predict client's quota
+    for _ in range(3):
+        r = client.post(
+            "/predict",
+            headers={"Authorization": f"Bearer {TEST_PREDICT_TOKEN}"},
+            json=_sample_customer_record(),
+        )
+        assert r.status_code == 200
+
+    r_blocked = client.post(
+        "/predict",
+        headers={"Authorization": f"Bearer {TEST_PREDICT_TOKEN}"},
+        json=_sample_customer_record(),
+    )
+    assert r_blocked.status_code == 429
+
+    # Audit and retraining clients still have full independent quotas
+    for _ in range(3):
+        r_audit = client.get(
+            "/audit/promotions",
+            headers={"Authorization": f"Bearer {TEST_AUDIT_TOKEN}"},
+        )
+        assert r_audit.status_code == 200
+
+        r_retrain = client.get(
+            "/retraining/jobs/active",
+            headers={"Authorization": f"Bearer {TEST_RETRAINING_TOKEN}"},
+        )
+        assert r_retrain.status_code == 200
+
+
+def test_api_same_client_shares_quota_across_protected_endpoints(rate_limit_env):
+    """Multiple requests from the same client across endpoints share a single quota."""
+    client = rate_limit_env["client"]
+    headers = {"Authorization": f"Bearer {TEST_MONITORING_TOKEN}"}
+
+    r1 = client.post(
+        "/monitoring/drift",
+        headers=headers,
+        json={"records": _sample_drift_records()},
+    )
+    assert r1.status_code == 200
+
+    r2 = client.post(
+        "/monitoring/drift/assess",
+        headers=headers,
+        json={"records": _sample_drift_records(), "dataset_id": "rl-shared-ds-1"},
+    )
+    assert r2.status_code == 200
+
+    r3 = client.post(
+        "/monitoring/drift",
+        headers=headers,
+        json={"records": _sample_drift_records()},
+    )
+    assert r3.status_code == 200
+
+    # 4th request across either monitoring endpoint hits the shared client quota
+    r4 = client.post(
+        "/monitoring/drift/assess",
+        headers=headers,
+        json={"records": _sample_drift_records(), "dataset_id": "rl-shared-ds-2"},
+    )
+    assert r4.status_code == 429
+
+
+def test_api_rate_limiting_enforced_across_all_six_protected_routes(rate_limit_env):
+    """Verify all six protected endpoints enforce per-client rate limiting."""
+    client = rate_limit_env["client"]
+    job_id = rate_limit_env["job_id"]
+    clock: FakeClock = rate_limit_env["clock"]
+
+    for method, path, body, role_name in _protected_endpoints(job_id):
+        # Advance window cleanly for each route check
+        clock.advance(120.0)
+        headers = {"Authorization": f"Bearer {ROLE_TOKENS[role_name]}"}
+        for _ in range(3):
+            r = client.request(method, path, headers=headers, json=body)
+            assert r.status_code == 200, f"{method} {path} returned {r.status_code}"
+
+        r_exceeded = client.request(method, path, headers=headers, json=body)
+        assert r_exceeded.status_code == 429, (
+            f"Expected 429 on {method} {path}, got {r_exceeded.status_code}"
+        )
+        assert r_exceeded.json() == {"detail": "Rate limit exceeded. Try again later."}
+        assert int(r_exceeded.headers["Retry-After"]) >= 1
+
+
+def test_api_disabled_rate_limiting_does_not_reject(rate_limit_env, monkeypatch):
+    """Verify disabling rate limiting allows requests past the configured limit."""
+    monkeypatch.setattr(api_module.settings, "rate_limit_enabled", False)
+    client = rate_limit_env["client"]
+    headers = {"Authorization": f"Bearer {TEST_PREDICT_TOKEN}"}
+
+    for _ in range(10):
+        resp = client.post("/predict", headers=headers, json=_sample_customer_record())
+        assert resp.status_code == 200
+
+
+@pytest.mark.parametrize(
+    "public_path",
+    ["/health", "/ready", "/metrics", "/metrics/prometheus"],
+)
+def test_api_public_endpoints_are_never_rate_limited(rate_limit_env, public_path):
+    """Verify public operational endpoints bypass rate limiting entirely."""
+    client = rate_limit_env["client"]
+    for _ in range(15):
+        resp = client.get(public_path)
+        assert resp.status_code == 200
+
+
+def test_api_unauthorized_requests_do_not_consume_quotas(rate_limit_env):
+    """Unauthenticated and invalid-credential requests (401) do not consume quotas."""
+    client = rate_limit_env["client"]
+    limiter: SlidingWindowRateLimiter = rate_limit_env["limiter"]
+
+    # Flood with missing and invalid credentials
+    for _ in range(10):
+        r_missing = client.post("/predict", json=_sample_customer_record())
+        assert r_missing.status_code == 401
+
+        r_invalid = client.post(
+            "/predict",
+            headers={"Authorization": "Bearer bogus-token-not-valid"},
+            json=_sample_customer_record(),
+        )
+        assert r_invalid.status_code == 401
+
+    assert limiter.tracked_client_count() == 0
+
+    # Valid client still gets all 3 requests
+    for _ in range(3):
+        r_ok = client.post(
+            "/predict",
+            headers={"Authorization": f"Bearer {TEST_PREDICT_TOKEN}"},
+            json=_sample_customer_record(),
+        )
+        assert r_ok.status_code == 200
+
+
+def test_api_insufficient_role_requests_do_not_consume_quotas(rate_limit_env):
+    """Authenticated clients rejected with 403 Forbidden do not consume quota."""
+    client = rate_limit_env["client"]
+    limiter: SlidingWindowRateLimiter = rate_limit_env["limiter"]
+
+    # predict client tries /audit/promotions (403 Forbidden) repeatedly
+    for _ in range(10):
+        r_forbidden = client.get(
+            "/audit/promotions",
+            headers={"Authorization": f"Bearer {TEST_PREDICT_TOKEN}"},
+        )
+        assert r_forbidden.status_code == 403
+
+    assert limiter.client_request_count("rbac-predict-client") == 0
+
+    # predict client still has its full quota on /predict
+    for _ in range(3):
+        r_ok = client.post(
+            "/predict",
+            headers={"Authorization": f"Bearer {TEST_PREDICT_TOKEN}"},
+            json=_sample_customer_record(),
+        )
+        assert r_ok.status_code == 200
+
+
+def test_api_admin_requests_use_admin_client_quota(rate_limit_env):
+    """Admin requests share the admin client's quota without affecting other clients."""
+    client = rate_limit_env["client"]
+    limiter: SlidingWindowRateLimiter = rate_limit_env["limiter"]
+    admin_headers = {"Authorization": f"Bearer {TEST_ADMIN_TOKEN}"}
+
+    assert (
+        client.post(
+            "/predict",
+            headers=admin_headers,
+            json=_sample_customer_record(),
+        ).status_code
+        == 200
+    )
+    assert client.get("/audit/promotions", headers=admin_headers).status_code == 200
+    assert (
+        client.get("/retraining/jobs/active", headers=admin_headers).status_code == 200
+    )
+
+    assert limiter.client_request_count("rbac-admin-client") == 3
+    assert limiter.client_request_count("rbac-predict-client") == 0
+
+    # 4th admin request across any protected route returns 429
+    r_admin_429 = client.get(
+        f"/retraining/jobs/{rate_limit_env['job_id']}",
+        headers=admin_headers,
+    )
+    assert r_admin_429.status_code == 429
+
+    # Non-admin predict client remains unaffected
+    r_predict_ok = client.post(
+        "/predict",
+        headers={"Authorization": f"Bearer {TEST_PREDICT_TOKEN}"},
+        json=_sample_customer_record(),
+    )
+    assert r_predict_ok.status_code == 200
+
+
+def test_api_rate_limiter_never_leaks_credentials_or_internal_state(
+    rate_limit_env, caplog
+):
+    """429 responses and logs must never leak tokens or internal rate-limit state."""
+    client = rate_limit_env["client"]
+    headers = {"Authorization": f"Bearer {TEST_PREDICT_TOKEN}"}
+
+    for _ in range(3):
+        assert (
+            client.post(
+                "/predict",
+                headers=headers,
+                json=_sample_customer_record(),
+            ).status_code
+            == 200
+        )
+
+    with caplog.at_level("WARNING", logger="backend.app.api.security"):
+        blocked = client.post(
+            "/predict",
+            headers=headers,
+            json=_sample_customer_record(),
+        )
+
+    assert blocked.status_code == 429
+    assert blocked.json() == {"detail": "Rate limit exceeded. Try again later."}
+    assert TEST_PREDICT_TOKEN not in blocked.text
+    assert "rbac-predict-client" not in blocked.text
+    assert "deque" not in blocked.text
+    assert "rate_limit_exceeded" in caplog.text
+    assert TEST_PREDICT_TOKEN not in caplog.text
+
+
+def test_api_concurrent_requests_respect_rate_limit(rate_limit_env):
+    """Concurrent HTTP requests through FastAPI cannot bypass the rate limit."""
+    client = rate_limit_env["client"]
+    headers = {"Authorization": f"Bearer {TEST_AUDIT_TOKEN}"}
+    total_requests = 12
+    barrier = threading.Barrier(total_requests)
+
+    def _call() -> int:
+        barrier.wait(timeout=5.0)
+        return client.get("/audit/promotions", headers=headers).status_code
+
+    with ThreadPoolExecutor(max_workers=total_requests) as pool:
+        statuses = list(pool.map(lambda _: _call(), range(total_requests)))
+
+    assert statuses.count(200) == 3
+    assert statuses.count(429) == 9

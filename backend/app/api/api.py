@@ -20,7 +20,11 @@ from backend.app.api.schemas import (
     PromotionAuditRecord,
     RetrainingJobResponse,
 )
-from backend.app.api.security import require_role
+from backend.app.api.security import (
+    SlidingWindowRateLimiter,
+    enforce_rate_limit,
+    require_role,
+)
 from backend.app.config import settings
 from backend.app.ml.audit import AuditDatabaseError, get_promotion_audit_records
 from backend.app.ml.drift import detect_data_drift
@@ -48,6 +52,11 @@ async def lifespan(app: FastAPI):
         "prediction_latency_max_seconds": 0.0,
     }
     app.state.prediction_latency_samples = deque(maxlen=1000)
+    if getattr(app.state, "rate_limiter", None) is None:
+        app.state.rate_limiter = SlidingWindowRateLimiter(
+            max_requests=settings.rate_limit_requests_per_minute,
+            window_seconds=settings.rate_limit_window_seconds,
+        )
 
     # Initialize audit database schema idempotently prior to MLflow setup
     migrate_audit_database_idempotent(settings.lifecycle_audit_db_path)
@@ -81,6 +90,7 @@ async def lifespan(app: FastAPI):
     yield
 
     app.state.churn_model = None
+    app.state.rate_limiter = None
     logger.info("model_unloaded")
 
 
@@ -247,7 +257,10 @@ def prometheus_metrics(request: Request) -> Response:
     )
 
 
-@app.post("/predict", dependencies=[Depends(require_role("predict"))])
+@app.post(
+    "/predict",
+    dependencies=[Depends(require_role("predict")), Depends(enforce_rate_limit)],
+)
 def predict_churn(
     request: ChurnPredictionRequest,
     api_request: Request,
@@ -303,7 +316,10 @@ def predict_churn(
         api_request.app.state.prediction_latency_samples.append(elapsed)
 
 
-@app.post("/monitoring/drift", dependencies=[Depends(require_role("monitoring"))])
+@app.post(
+    "/monitoring/drift",
+    dependencies=[Depends(require_role("monitoring")), Depends(enforce_rate_limit)],
+)
 def monitor_data_drift(
     batch: DriftBatchRequest,
     api_request: Request,
@@ -364,7 +380,7 @@ def monitor_data_drift(
     "/monitoring/drift/assess",
     response_model=DriftAssessmentResponse,
     status_code=200,
-    dependencies=[Depends(require_role("monitoring"))],
+    dependencies=[Depends(require_role("monitoring")), Depends(enforce_rate_limit)],
     responses={
         409: {
             "model": DriftAssessmentResponse,
@@ -473,7 +489,7 @@ def drift_assess_and_queue(
 @app.get(
     "/audit/promotions",
     response_model=list[PromotionAuditRecord],
-    dependencies=[Depends(require_role("audit"))],
+    dependencies=[Depends(require_role("audit")), Depends(enforce_rate_limit)],
 )
 def get_promotion_audits(
     limit: Annotated[int, Query(ge=1, le=100)] = 10,
@@ -498,7 +514,7 @@ def get_promotion_audits(
     "/retraining/jobs/active",
     response_model=ActiveJobResponse,
     status_code=200,
-    dependencies=[Depends(require_role("retraining"))],
+    dependencies=[Depends(require_role("retraining")), Depends(enforce_rate_limit)],
     responses={
         503: {
             "description": "Retraining job service unavailable.",
@@ -535,7 +551,7 @@ def get_active_retraining_job() -> ActiveJobResponse:
     "/retraining/jobs/{job_id}",
     response_model=RetrainingJobResponse,
     status_code=200,
-    dependencies=[Depends(require_role("retraining"))],
+    dependencies=[Depends(require_role("retraining")), Depends(enforce_rate_limit)],
     responses={
         404: {
             "description": "Retraining job not found.",
