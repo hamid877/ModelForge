@@ -9,10 +9,12 @@ from datetime import UTC, datetime, timedelta
 from unittest.mock import patch
 
 import pytest
+from pydantic import SecretStr
 from starlette.testclient import TestClient
 
 import backend.app.api.api as api_module
 from backend.app.api.api import app
+from backend.app.config import ClientApiKeyConfig
 from backend.app.ml.db import db_connection
 from backend.app.ml.drift_alerts import persist_drift_alert
 from backend.app.ml.jobs import (
@@ -23,6 +25,27 @@ from backend.app.ml.jobs import (
     transition_job_status,
 )
 from backend.app.ml.migrations import migrate_audit_database_idempotent
+
+TEST_RETRAINING_TOKEN = "test-jobs-retraining-token-001"
+
+TEST_JOBS_API_KEYS = (
+    ClientApiKeyConfig(
+        client_id="test-jobs-retraining-client",
+        token=SecretStr(TEST_RETRAINING_TOKEN),
+        roles=("retraining",),
+    ),
+)
+
+RETRAINING_AUTH_HEADERS = {"Authorization": f"Bearer {TEST_RETRAINING_TOKEN}"}
+
+
+@pytest.fixture(autouse=True)
+def configure_test_api_keys(monkeypatch):
+    """Configure synthetic test-only API keys for job endpoint tests."""
+    monkeypatch.setattr(
+        "backend.app.api.security.settings.api_keys",
+        TEST_JOBS_API_KEYS,
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -52,7 +75,10 @@ def test_get_active_job_when_none_exists(mock_load_model, test_db):
         patch("backend.app.api.api.settings.lifecycle_audit_db_path", str(test_db)),
         TestClient(app) as client,
     ):
-        response = client.get("/retraining/jobs/active")
+        response = client.get(
+            "/retraining/jobs/active",
+            headers=RETRAINING_AUTH_HEADERS,
+        )
 
     assert response.status_code == 200
     data = response.json()
@@ -82,7 +108,10 @@ def test_get_active_job_when_only_terminal_jobs_exist(mock_load_model, test_db):
         patch("backend.app.api.api.settings.lifecycle_audit_db_path", str(test_db)),
         TestClient(app) as client,
     ):
-        response = client.get("/retraining/jobs/active")
+        response = client.get(
+            "/retraining/jobs/active",
+            headers=RETRAINING_AUTH_HEADERS,
+        )
 
     assert response.status_code == 200
     data = response.json()
@@ -114,7 +143,10 @@ def test_get_active_job_queued(mock_load_model, test_db):
         patch("backend.app.api.api.settings.lifecycle_audit_db_path", str(test_db)),
         TestClient(app) as client,
     ):
-        response = client.get("/retraining/jobs/active")
+        response = client.get(
+            "/retraining/jobs/active",
+            headers=RETRAINING_AUTH_HEADERS,
+        )
 
     assert response.status_code == 200
     data = response.json()
@@ -146,7 +178,10 @@ def test_get_active_job_running(mock_load_model, test_db):
         patch("backend.app.api.api.settings.lifecycle_audit_db_path", str(test_db)),
         TestClient(app) as client,
     ):
-        response = client.get("/retraining/jobs/active")
+        response = client.get(
+            "/retraining/jobs/active",
+            headers=RETRAINING_AUTH_HEADERS,
+        )
 
     assert response.status_code == 200
     data = response.json()
@@ -187,7 +222,10 @@ def test_get_active_job_reconciliation_required(mock_load_model, test_db):
         patch("backend.app.api.api.settings.lifecycle_audit_db_path", str(test_db)),
         TestClient(app) as client,
     ):
-        response = client.get("/retraining/jobs/active")
+        response = client.get(
+            "/retraining/jobs/active",
+            headers=RETRAINING_AUTH_HEADERS,
+        )
 
     assert response.status_code == 200
     data = response.json()
@@ -253,7 +291,10 @@ def test_get_job_by_id_all_six_states(mock_load_model, test_db, target_status):
         patch("backend.app.api.api.settings.lifecycle_audit_db_path", str(test_db)),
         TestClient(app) as client,
     ):
-        response = client.get(f"/retraining/jobs/{jid}")
+        response = client.get(
+            f"/retraining/jobs/{jid}",
+            headers=RETRAINING_AUTH_HEADERS,
+        )
 
     assert response.status_code == 200
     data = response.json()
@@ -274,7 +315,10 @@ def test_get_job_by_id_unknown_returns_404(mock_load_model, test_db):
         patch("backend.app.api.api.settings.lifecycle_audit_db_path", str(test_db)),
         TestClient(app) as client,
     ):
-        response = client.get("/retraining/jobs/job-non-existent-999")
+        response = client.get(
+            "/retraining/jobs/job-non-existent-999",
+            headers=RETRAINING_AUTH_HEADERS,
+        )
 
     assert response.status_code == 404
     assert response.json() == {
@@ -299,8 +343,14 @@ def test_field_exclusions_enforced(mock_load_model, test_db):
         patch("backend.app.api.api.settings.lifecycle_audit_db_path", str(test_db)),
         TestClient(app) as client,
     ):
-        resp_active = client.get("/retraining/jobs/active")
-        resp_by_id = client.get(f"/retraining/jobs/{created['job_id']}")
+        resp_active = client.get(
+            "/retraining/jobs/active",
+            headers=RETRAINING_AUTH_HEADERS,
+        )
+        resp_by_id = client.get(
+            f"/retraining/jobs/{created['job_id']}",
+            headers=RETRAINING_AUTH_HEADERS,
+        )
 
     assert resp_active.status_code == 200
     assert resp_by_id.status_code == 200
@@ -349,9 +399,15 @@ def test_endpoints_are_strictly_read_only(mock_load_model, test_db):
         TestClient(app) as client,
     ):
         for _ in range(5):
-            res_act = client.get("/retraining/jobs/active")
+            res_act = client.get(
+                "/retraining/jobs/active",
+                headers=RETRAINING_AUTH_HEADERS,
+            )
             assert res_act.status_code == 200
-            res_id = client.get(f"/retraining/jobs/{jid}")
+            res_id = client.get(
+                f"/retraining/jobs/{jid}",
+                headers=RETRAINING_AUTH_HEADERS,
+            )
             assert res_id.status_code == 200
 
     # Verify DB row is completely unchanged
@@ -378,8 +434,14 @@ def test_database_failure_returns_503(mock_load_model):
         ),
         TestClient(app) as client,
     ):
-        res_active = client.get("/retraining/jobs/active")
-        res_id = client.get("/retraining/jobs/job-any-id")
+        res_active = client.get(
+            "/retraining/jobs/active",
+            headers=RETRAINING_AUTH_HEADERS,
+        )
+        res_id = client.get(
+            "/retraining/jobs/job-any-id",
+            headers=RETRAINING_AUTH_HEADERS,
+        )
 
     assert res_active.status_code == 503
     assert res_active.json() == {"detail": "The retraining job service is unavailable."}

@@ -17,8 +17,20 @@ This document provides a live tracking record of engineering milestones, phase i
 | **Milestone 7** | Promotion Traceability & Auditability | Completed | Dataset provenance, benchmark gate integrity, and SQLite audit records implemented. |
 | **Milestone 8** | Read-Only Promotion Audit API | Completed | `GET /audit/promotions` endpoint, Pydantic schemas, and error isolation. |
 | **Milestone 9** | Controlled Drift Response & Retraining Orchestration | Completed | All Phases 6A–6G.1 and Live Docker Compose Validation Complete. |
-| **Milestone 10** | API Auth, Authorization & Rate Limiting | Proposed | Planned future engineering work. |
+| **Milestone 10** | API Auth, Authorization & Rate Limiting | In Progress | Phase 1 (Authentication Foundation) and Phase 2 (RBAC & Endpoint Protection) complete; Phase 3 (Rate Limiting) pending. |
 | **Milestone 11** | Persistence & Concurrency Evaluation | Proposed | Planned future engineering work. |
+
+---
+
+## Milestone 10: API Authentication, Authorization & Rate Limiting (In Progress)
+
+### Phase Progress Breakdown
+
+| Phase | Description | Status | Verification Detail |
+|---|---|---|---|
+| **Phase 1** | Authentication Foundation | **Completed** | Dual-header (`Authorization: Bearer` / `X-API-Key`) validation, constant-time token comparison, conflicting-header rejection, and sanitized 401 responses (`backend/app/api/security.py`, `backend/app/config.py`). |
+| **Phase 2** | RBAC & Endpoint Protection | **Completed** | `require_role` dependency, endpoint-to-role bindings on `/predict`, `/monitoring/drift`, `/monitoring/drift/assess`, `/audit/promotions`, `/retraining/jobs/active`, `/retraining/jobs/{job_id}`, `admin` wildcard access, public health/metrics routes, OpenAPI security schemes, and `docs/API_SECURITY.md`. |
+| **Phase 3** | Rate Limiting | Pending | Not yet implemented. |
 
 ---
 
