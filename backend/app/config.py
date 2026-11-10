@@ -163,6 +163,19 @@ class Settings(BaseSettings):
         default=(),
     )
 
+    # Process-local sliding-window rate limiting configuration
+    rate_limit_enabled: bool = Field(
+        default=True,
+    )
+    rate_limit_requests_per_minute: int = Field(
+        default=60,
+        ge=1,
+    )
+    rate_limit_window_seconds: int = Field(
+        default=60,
+        ge=1,
+    )
+
     @field_validator("api_keys", mode="after")
     @classmethod
     def validate_api_keys(
