@@ -2,7 +2,7 @@
 
 This document describes the authentication, role-based access control (RBAC), and rate-limiting mechanisms protecting the ModelForge FastAPI service (`backend/app/api/api.py`, `backend/app/api/security.py`, and `backend/app/config.py`).
 
-> **Scope Note**: Milestone 10 Phase 1 (Authentication Foundation), Phase 2 (RBAC and Endpoint Protection), and Phase 3 (Rate Limiting) are implemented. Phase 4 (Security Hardening and Final Acceptance Verification) is pending.
+> **Scope Note**: Milestone 10 Phases 1–4 (Authentication Foundation, RBAC and Endpoint Protection, Rate Limiting, and Security Hardening & Final Acceptance) are complete. ModelForge remains a local development stack; M11 and ModelForge 1.0 release verification remain pending.
 
 ---
 
@@ -14,8 +14,9 @@ Protected endpoints authenticate clients via `get_current_client` in `backend/ap
   - `Authorization: Bearer <token>` (`HTTPBearer` OpenAPI scheme)
   - `X-API-Key: <token>` (`APIKeyHeader` OpenAPI scheme)
 - **Dual-Header Handling**: Supplying both headers with identical tokens is permitted; supplying conflicting tokens is rejected with HTTP `401 Unauthorized`.
-- **Credential Validation**: Tokens are matched against `settings.api_keys` (`MODELFORGE_API_KEYS`) using constant-time comparison (`secrets.compare_digest`). No default credentials exist; unconfigured `MODELFORGE_API_KEYS` fails closed.
-- **Error Sanitization**: Authentication failures return HTTP `401 Unauthorized` with `WWW-Authenticate: Bearer` and sanitized detail messages without echoing supplied tokens or internal configuration.
+- **Credential Validation**: Tokens are matched against `settings.api_keys` (`MODELFORGE_API_KEYS`) using constant-time comparison (`secrets.compare_digest` over UTF-8 encoded bytes, iterating across all configured keys without early exit). Incoming non-ASCII header bytes are rejected cleanly with HTTP `401 Unauthorized`. No default credentials exist; unconfigured `MODELFORGE_API_KEYS` fails closed. Leading/trailing token whitespace is normalized during configuration validation (`ClientApiKeyConfig`) and matched consistently at authentication time.
+- **Credential Rotation & Restart Requirement**: `settings` (`backend/app/config.py`) is instantiated once at process import time. Adding, revoking, or rotating credentials in `MODELFORGE_API_KEYS` requires restarting the `api` process (e.g., `docker compose up -d --no-deps api`).
+- **Error & Log Sanitization**: Authentication, authorization, and rate-limit failures return sanitized HTTP error responses (`401` with `WWW-Authenticate: Bearer`, `403`, or `429`) without echoing supplied tokens or internal configuration. Security logs sanitize untrusted values (such as `request.url.path` and `client_ip`) via `_sanitize_log_value` to neutralize control characters, Unicode line/paragraph separators, whitespace/`=` delimiters, and oversized strings.
 
 ---
 
@@ -112,4 +113,29 @@ Content-Type: application/json
 - **Process-Local State**: `SlidingWindowRateLimiter` stores request timestamps in process memory on `app.state.rate_limiter` (with no Redis or SQLite writes).
 - **Single-Worker Accuracy**: In the default single-process local development setup (`uvicorn ... --workers 1`), limits are enforced consistently across all incoming requests.
 - **Multi-Worker / Distributed Deployments**: Increasing the Uvicorn worker count (`--workers N`) or running multiple API replicas creates independent in-memory rate-limiter instances per process. Under round-robin or load-balanced traffic, a client can effectively send up to `N * rate_limit_requests_per_minute` requests across the cluster. Globally consistent rate limiting across multiple workers or replicas requires a shared external store (such as Redis).
+
+---
+
+## Docker Compose Configuration & Remaining Limitations
+
+### Docker Compose Environment Forwarding
+
+`docker-compose.yml` forwards API security and rate-limiting variables from `.env` (or the host environment) to the `api` service **only**, with fail-closed defaults:
+
+| Environment Variable | Compose Default | Forwarded To |
+|---|---|---|
+| `MODELFORGE_API_KEYS` | `[]` (fail-closed) | `api` only |
+| `MODELFORGE_RATE_LIMIT_ENABLED` | `true` | `api` only |
+| `MODELFORGE_RATE_LIMIT_REQUESTS_PER_MINUTE` | `60` | `api` only |
+| `MODELFORGE_RATE_LIMIT_WINDOW_SECONDS` | `60` | `api` only |
+
+Credentials are never forwarded to `worker` or `mlflow` services. `.env.example` provides clearly labeled development-only example tokens (`dev-predict-token-secret-replace-me`, `dev-admin-token-secret-replace-me`) that must be replaced before use in any shared environment.
+
+### Remaining Security Limitations
+
+- **No TLS Termination**: Traffic between clients, `api`, `mlflow`, `prometheus`, and `grafana` is plain HTTP; loopback binding (`127.0.0.1`) is used in `docker-compose.yml`, and a TLS-terminating reverse proxy is required for non-local exposure.
+- **Process-Local Rate Limiting**: In-memory rate limits reset on API restart and are not shared across multiple workers or replicas.
+- **Static Environment-Based Credentials**: Credentials reside in `.env` / environment variables and require an API process restart to rotate or revoke.
+- **Unauthenticated Observability / Tracking Services**: Prometheus, MLflow, and public API health/metrics endpoints remain unauthenticated on loopback interfaces by design for local orchestration.
+- **HTTP Header Encoding**: Per HTTP header conventions, Bearer and `X-API-Key` credentials should use ASCII tokens; non-ASCII header bytes are rejected safely with HTTP `401`.
 

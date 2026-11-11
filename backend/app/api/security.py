@@ -3,6 +3,7 @@ import math
 import secrets
 import threading
 import time
+import unicodedata
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -48,6 +49,47 @@ api_key_header = APIKeyHeader(
 )
 
 
+def _constant_time_equals(left: str, right: str) -> bool:
+    """Compare two strings in constant time using UTF-8 encoded bytes."""
+    return secrets.compare_digest(left.encode("utf-8"), right.encode("utf-8"))
+
+
+def _sanitize_log_value(value: object, max_length: int = 200) -> str:
+    """Sanitize untrusted values for single-line key=value security logs."""
+    text = str(value) if value is not None else ""
+    sanitized_parts: list[str] = []
+    current_len = 0
+    truncated = False
+
+    for ch in text:
+        code = ord(ch)
+        if (
+            code < 0x20
+            or code == 0x7F
+            or ch.isspace()
+            or ch == "="
+            or unicodedata.category(ch) in {"Cc", "Cf", "Zl", "Zp"}
+        ):
+            escaped = f"\\x{code:02x}" if code <= 0xFF else f"\\u{code:04x}"
+        else:
+            escaped = ch
+
+        if current_len + len(escaped) > max_length:
+            truncated = True
+            break
+
+        sanitized_parts.append(escaped)
+        current_len += len(escaped)
+
+    result = "".join(sanitized_parts)
+    if truncated:
+        suffix = "..."
+        if max_length <= len(suffix):
+            return suffix[:max_length]
+        return result[: max_length - len(suffix)] + suffix
+    return result
+
+
 def authenticate_token(
     token: str,
     configured_keys: tuple[ClientApiKeyConfig, ...] | None = None,
@@ -68,7 +110,7 @@ def authenticate_token(
     matched: ClientApiKeyConfig | None = None
     for client_config in keys:
         secret_val = client_config.token.get_secret_value()
-        if secrets.compare_digest(clean_token, secret_val):
+        if _constant_time_equals(clean_token, secret_val):
             matched = client_config
 
     if matched is None:
@@ -92,7 +134,10 @@ def get_current_client(
     Always includes 'WWW-Authenticate: Bearer' on 401 responses.
     Never echoes supplied credentials in error messages or logs.
     """
-    client_ip = request.client.host if request.client else "unknown"
+    client_ip = _sanitize_log_value(
+        request.client.host if request.client else "unknown"
+    )
+    safe_path = _sanitize_log_value(request.url.path)
     raw_auth = request.headers.get("Authorization")
     raw_api_key = request.headers.get("X-API-Key")
 
@@ -100,7 +145,7 @@ def get_current_client(
         logger.warning(
             "auth_failed reason=missing_credentials client_ip=%s path=%s",
             client_ip,
-            request.url.path,
+            safe_path,
         )
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -114,7 +159,7 @@ def get_current_client(
             logger.warning(
                 "auth_failed reason=malformed_auth_header client_ip=%s path=%s",
                 client_ip,
-                request.url.path,
+                safe_path,
             )
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
@@ -130,7 +175,7 @@ def get_current_client(
             logger.warning(
                 "auth_failed reason=empty_api_key_header client_ip=%s path=%s",
                 client_ip,
-                request.url.path,
+                safe_path,
             )
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
@@ -140,11 +185,11 @@ def get_current_client(
         api_key_token = clean_key
 
     if bearer_token is not None and api_key_token is not None:
-        if not secrets.compare_digest(bearer_token, api_key_token):
+        if not _constant_time_equals(bearer_token, api_key_token):
             logger.warning(
                 "auth_failed reason=conflicting_credentials client_ip=%s path=%s",
                 client_ip,
-                request.url.path,
+                safe_path,
             )
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
@@ -161,7 +206,7 @@ def get_current_client(
         logger.warning(
             "auth_failed reason=invalid_credentials client_ip=%s path=%s",
             client_ip,
-            request.url.path,
+            safe_path,
         )
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -171,9 +216,9 @@ def get_current_client(
 
     logger.info(
         "auth_succeeded client_id=%s client_ip=%s path=%s",
-        authenticated_client.client_id,
+        _sanitize_log_value(authenticated_client.client_id),
         client_ip,
-        request.url.path,
+        safe_path,
     )
     return authenticated_client
 
@@ -189,13 +234,16 @@ def require_role(role_name: str) -> Callable[..., AuthenticatedClient]:
         client: Annotated[AuthenticatedClient, Depends(get_current_client)],
     ) -> AuthenticatedClient:
         if not client.has_role(clean_role):
-            client_ip = request.client.host if request.client else "unknown"
+            client_ip = _sanitize_log_value(
+                request.client.host if request.client else "unknown"
+            )
+            safe_path = _sanitize_log_value(request.url.path)
             logger.warning(
                 "authz_failed client_id=%s required_role=%s client_ip=%s path=%s",
-                client.client_id,
-                clean_role,
+                _sanitize_log_value(client.client_id),
+                _sanitize_log_value(clean_role),
                 client_ip,
-                request.url.path,
+                safe_path,
             )
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
@@ -394,12 +442,15 @@ def enforce_rate_limit(
     limiter = get_rate_limiter(request)
     decision = limiter.check_rate_limit(client.client_id)
     if not decision.allowed:
-        client_ip = request.client.host if request.client else "unknown"
+        client_ip = _sanitize_log_value(
+            request.client.host if request.client else "unknown"
+        )
+        safe_path = _sanitize_log_value(request.url.path)
         logger.warning(
             "rate_limit_exceeded client_id=%s client_ip=%s path=%s retry_after=%s",
-            client.client_id,
+            _sanitize_log_value(client.client_id),
             client_ip,
-            request.url.path,
+            safe_path,
             decision.retry_after_seconds,
         )
         raise HTTPException(

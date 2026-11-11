@@ -241,10 +241,40 @@ def test_api_keys_reject_empty_client_id(monkeypatch):
 
 def test_api_keys_reject_empty_token(monkeypatch):
     """Verify configuration rejects client with empty or whitespace token."""
-    payload = '[{"client_id": "c1", "token": "   ", "roles": ["predict"]}]'
+    for blank_token in ("   ", "\\t\\n "):
+        payload = (
+            f'[{{"client_id": "c1", "token": "{blank_token}", "roles": ["predict"]}}]'
+        )
+        monkeypatch.setenv("MODELFORGE_API_KEYS", payload)
+        with pytest.raises(ValidationError) as exc_info:
+            Settings(_env_file=None)
+        assert "token must not be empty or whitespace" in str(exc_info.value)
+
+
+def test_api_keys_normalize_padded_token_and_preserve_masking_and_dedup(monkeypatch):
+    """Padded tokens normalize consistently, stay masked, and deduplicate properly."""
+    secret_body = "padded-secret-token-9876"
+    payload = (
+        f'[{{"client_id": "c1", "token": "  {secret_body}  ", "roles": ["predict"]}}]'
+    )
     monkeypatch.setenv("MODELFORGE_API_KEYS", payload)
-    with pytest.raises(ValidationError):
+    config = Settings(_env_file=None)
+
+    assert config.api_keys[0].token.get_secret_value() == secret_body
+    assert secret_body not in repr(config)
+    assert secret_body not in repr(config.api_keys[0])
+    assert "**********" in repr(config.api_keys[0])
+
+    # Duplicate detection still catches padded vs unpadded identical tokens
+    dup_payload = (
+        f'[{{"client_id": "c1", "token": "  {secret_body}  ", "roles": ["predict"]}}, '
+        f'{{"client_id": "c2", "token": "{secret_body}", "roles": ["audit"]}}]'
+    )
+    monkeypatch.setenv("MODELFORGE_API_KEYS", dup_payload)
+    with pytest.raises(ValidationError) as exc_info:
         Settings(_env_file=None)
+    assert "Duplicate token detected" in str(exc_info.value)
+    assert secret_body not in str(exc_info.value)
 
 
 def test_api_keys_reject_malformed_json(monkeypatch):
