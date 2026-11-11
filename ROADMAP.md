@@ -17,14 +17,13 @@ This document outlines the milestones established during the AI Engineering audi
 | **Milestone 7** | Promotion Traceability & Auditability | Completed | Implemented dataset provenance tracking, promotion evaluation traceability, SQLite and MLflow decision audit records, and fail-closed safety gates. |
 | **Milestone 8** | Read-Only Promotion Audit API | Completed | Implemented read-only HTTP endpoint (`GET /audit/promotions`) with strict Pydantic schemas, isolated SQLite query execution, defensive error handling, and comprehensive test coverage. |
 | **Milestone 9** | Controlled Drift Response and Retraining Orchestration | Completed | Bridge drift detection and model retraining with automated trigger policy, concurrency locking, cooldown guardrails, asynchronous worker orchestration, and Prometheus/Grafana observability. All Phases 6A–6G.1 and live Docker Compose validation complete. |
+| **Milestone 10** | API Authentication, Authorization and Rate Limiting | Completed | Implemented Bearer/X-API-Key authentication, RBAC endpoint protection, process-local sliding-window rate limiting, Phase 4 security hardening (UTF-8 constant-time comparison, log sanitization, token whitespace normalization, Compose env forwarding), and full acceptance verification (530 tests passed). See `docs/API_SECURITY.md`. |
 
 ---
 
 ## In Progress Engineering Milestones
 
-| Milestone | Title | Status | Description |
-|---|---|---|---|
-| **Milestone 10** | API Authentication, Authorization and Rate Limiting | In Progress | Phase 1 (Authentication Foundation) and Phase 2 (RBAC and Endpoint Protection) complete; Phase 3 (Rate Limiting) pending. See `docs/API_SECURITY.md`. |
+*None — Milestone 10 is complete; Milestone 11 and ModelForge 1.0 release verification remain pending.*
 
 ---
 
@@ -232,14 +231,15 @@ Bridge drift detection and model retraining with automated trigger policies, dur
 
 ---
 
-## Detailed Milestone Scope: Milestone 10 (In Progress) & Proposed Milestone 11
+## Detailed Milestone Scope: Milestone 10 (Completed) & Proposed Milestone 11
 
-### Milestone 10: API Authentication, Authorization and Rate Limiting *(In Progress)*
+### Milestone 10: API Authentication, Authorization and Rate Limiting *(Completed)*
 
 #### Phase Status
 - **Phase 1 — Authentication Foundation**: Completed (`backend/app/api/security.py`, `backend/app/config.py`). Dual-header (`Authorization: Bearer` / `X-API-Key`) authentication, constant-time token comparison, conflicting-header rejection, and sanitized 401 responses.
 - **Phase 2 — RBAC and Endpoint Protection**: Completed (`require_role`, `backend/app/api/api.py`, `docs/API_SECURITY.md`). Route protection attached to `/predict` (`predict`), `/monitoring/drift` and `/monitoring/drift/assess` (`monitoring`), `/audit/promotions` (`audit`), and `/retraining/jobs/active` and `/retraining/jobs/{job_id}` (`retraining`), with `admin` wildcard support and public `/health`, `/ready`, `/metrics`, and `/metrics/prometheus`.
-- **Phase 3 — Rate Limiting**: Pending (not yet implemented).
+- **Phase 3 — Rate Limiting**: Completed (`SlidingWindowRateLimiter`, `enforce_rate_limit`). Thread-safe, process-local per-client sliding-window rate limiter executing after auth and RBAC, returning HTTP 429 with integer `Retry-After` and bounding memory via expired-client cleanup.
+- **Phase 4 — Security Hardening and Final Acceptance**: Completed. Security audit remediation (UTF-8 constant-time comparison for non-ASCII headers, `_sanitize_log_value` log injection protection, consistent token whitespace normalization, and Compose `api`-only security env forwarding), full regression suite (`530 passed`), Ruff lint/format clean, OpenAPI and Compose config validation, and P95 overhead benchmark (`<= 2.0 ms`).
 
 #### Objective
 Implement a standards-compliant authentication, role-based authorization, and rate-limiting middleware layer to secure ModelForge endpoints against unauthorized usage and abusive query bursts.
@@ -248,15 +248,15 @@ Implement a standards-compliant authentication, role-based authorization, and ra
 - **Lightweight Authentication** *(Phase 1 — Complete)*: Header-based API key or Bearer token validation integrated into FastAPI via dependency injection.
 - **Role-Based Route Access (RBAC)** *(Phase 2 — Complete)*: Differentiate access privileges across prediction (`predict`), monitoring (`monitoring`), audit (`audit`), retraining (`retraining`), and `admin` roles.
 - **Open Health Scrapes** *(Phase 2 — Complete)*: Maintain zero-credential access for orchestrator health checks (`/health`, `/ready`) and metrics scraping (`/metrics`, `/metrics/prometheus`).
-- **Rate Limiting & Burst Protection** *(Phase 3 — Pending)*: Token-bucket or sliding-window rate limiting per API key/client identifier with configurable limits and standard `Retry-After` headers.
-- **Audit & Security Logging** *(Phases 1–2 partial; Phase 3 pending)*: Structured logging of authentication and authorization failures with masked credentials; rate-limit violation logging pending Phase 3.
+- **Rate Limiting & Burst Protection** *(Phase 3 — Complete)*: Process-local sliding-window rate limiting per authenticated `client_id` with configurable limits and standard integer `Retry-After` headers.
+- **Audit & Security Logging & Hardening** *(Phase 4 — Complete)*: Structured logging of auth, authz, and rate-limit events with credential masking, log-value sanitization, non-ASCII safety, and Compose forwarding.
 
 #### Measurable Acceptance Criteria
-1. **Authentication & authorization enforcement** *(Verified in Phase 2)*: Requests without valid tokens to protected endpoints return HTTP 401 Unauthorized; requests with insufficient role permissions return HTTP 403 Forbidden.
-2. **Health availability** *(Verified in Phase 2)*: `/health`, `/ready`, `/metrics`, and `/metrics/prometheus` respond successfully (HTTP 200) without authentication credentials.
-3. **Rate limit behavior** *(Pending Phase 3)*: Traffic exceeding configured requests-per-minute limits returns HTTP 429 Too Many Requests with a valid integer `Retry-After` header.
-4. **Latency overhead** *(Pending Phase 3)*: Authentication and rate limiting middleware adds $\le 2.0\text{ms}$ P95 latency overhead to the prediction path.
-5. **Test coverage** *(Phases 1–2 verified; Phase 3 pending)*: Unit and integration tests covering missing credentials, invalid credentials, role authorization matrix, and (in Phase 3) rate-limit exhaustion.
+1. **Authentication & authorization enforcement** *(Verified)*: Requests without valid tokens to protected endpoints return HTTP 401 Unauthorized; requests with insufficient role permissions return HTTP 403 Forbidden.
+2. **Health availability** *(Verified)*: `/health`, `/ready`, `/metrics`, and `/metrics/prometheus` respond successfully (HTTP 200) without authentication credentials.
+3. **Rate limit behavior** *(Verified)*: Traffic exceeding configured limits returns HTTP 429 Too Many Requests with a valid integer `Retry-After` header.
+4. **Latency overhead** *(Verified in-process)*: Security dependencies add `0.8110 ms` P95 delta under in-process `TestClient` benchmarking (`0.0034 ms` P95 direct component execution), within the `<= 2.0 ms` target.
+5. **Test coverage** *(Verified)*: 94 focused security/config tests and 530 full-suite tests pass covering auth, RBAC, rate limiting, non-ASCII headers, log sanitization, token normalization, and secret masking.
 
 ---
 

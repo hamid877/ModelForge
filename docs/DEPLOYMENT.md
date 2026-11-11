@@ -159,14 +159,17 @@ cp .env.example .env
 
 ### API environment variables
 
-The `api` service receives the following environment variables directly from
-`docker-compose.yml`:
+The `api` service receives the following environment variables in `docker-compose.yml` (with security and rate-limit settings forwarded from `.env` or host environment using fail-closed defaults):
 
 | Variable | Value in Compose | Default in `config.py` | Description |
 |---|---|---|---|
 | `MODELFORGE_MODEL_NAME` | `churn-classifier` | `churn-classifier` | MLflow registered model name to load |
 | `MODELFORGE_MODEL_ALIAS` | `champion` | `champion` | Model alias to resolve at startup |
 | `MODELFORGE_MLFLOW_TRACKING_URI` | `http://mlflow:5000` | `http://127.0.0.1:5001` | MLflow server URL (uses internal Docker hostname) |
+| `MODELFORGE_API_KEYS` | `${MODELFORGE_API_KEYS:-[]}` | `()` | JSON list of API client credentials (`api` only; fails closed when empty) |
+| `MODELFORGE_RATE_LIMIT_ENABLED` | `${MODELFORGE_RATE_LIMIT_ENABLED:-true}` | `True` | Enables process-local per-client rate limiting |
+| `MODELFORGE_RATE_LIMIT_REQUESTS_PER_MINUTE` | `${MODELFORGE_RATE_LIMIT_REQUESTS_PER_MINUTE:-60}` | `60` | Maximum accepted requests per client per window |
+| `MODELFORGE_RATE_LIMIT_WINDOW_SECONDS` | `${MODELFORGE_RATE_LIMIT_WINDOW_SECONDS:-60}` | `60` | Sliding rate-limit window duration in seconds |
 
 ### Full settings reference (`config.py`)
 
@@ -412,11 +415,9 @@ All four services are bound to `127.0.0.1`. Do not change the port bindings to
 `0.0.0.0` without placing an authenticated reverse proxy (e.g. nginx + TLS +
 HTTP Basic/OAuth) in front of every service.
 
-### No authentication on the API
+### API Authentication, RBAC, and Rate Limiting
 
-The FastAPI application (`/predict`, `/monitoring/drift`, `/metrics`, `/audit/promotions`) has no
-authentication layer. Any process that can reach port 8000 can submit predictions,
-trigger drift analysis, or inspect promotion audit logs.
+Protected API endpoints (`/predict`, `/monitoring/drift`, `/monitoring/drift/assess`, `/audit/promotions`, `/retraining/jobs/active`, `/retraining/jobs/{job_id}`) require `Authorization: Bearer <token>` or `X-API-Key: <token>` credentials configured via `MODELFORGE_API_KEYS`, enforce role-based access control, and apply process-local per-client sliding-window rate limiting. Public health and metrics endpoints (`/health`, `/ready`, `/metrics`, `/metrics/prometheus`) remain unauthenticated for orchestrator probes and Prometheus scraping. See [API_SECURITY.md](API_SECURITY.md) for full details, credential rotation requirements (API restart required), and remaining limitations.
 
 ### No authentication on Prometheus
 
@@ -457,7 +458,7 @@ permission errors will occur.
 | **SQLite backend** | Not suitable for concurrent MLflow writes or multi-node deployments | Evaluate concurrency under load; migrate to PostgreSQL only if justified by empirical evidence (Milestone 11) |
 | **Single-node stack** | No horizontal scaling, no load balancing | Use Kubernetes + multi-replica deployment |
 | **No TLS** | Data in transit is unencrypted | Add a TLS-terminating reverse proxy |
-| **No API authentication** | All endpoints are open | Add authentication middleware (Milestone 10) |
+| **Static API credentials & process-local rate limiting** | Rotating `MODELFORGE_API_KEYS` requires an API restart; rate-limit state is in-memory per API process | Use a reverse proxy/API gateway or shared store (e.g., Redis) for multi-worker deployments; see [API_SECURITY.md](API_SECURITY.md) |
 | **Loopback-only binding** | Services not reachable remotely | Intentional for local dev; requires proxy for remote access |
 | **`modelforge-api:dev` image** | Must be built locally; not published to a registry | Publish to a container registry (e.g. GHCR) and update Compose |
 | **No secrets management** | Credentials are in `.env` on disk | Integrate Docker Secrets or a vault |

@@ -33,9 +33,10 @@ class ClientApiKeyConfig(BaseModel):
     @field_validator("token")
     @classmethod
     def validate_token(cls, v: SecretStr) -> SecretStr:
-        if not v.get_secret_value().strip():
+        clean = v.get_secret_value().strip()
+        if not clean:
             raise ValueError("token must not be empty or whitespace.")
-        return v
+        return SecretStr(clean)
 
     @field_validator("roles", mode="before")
     @classmethod

@@ -15,6 +15,7 @@ from backend.app.api import api as api_module
 from backend.app.api.security import (
     AuthenticatedClient,
     SlidingWindowRateLimiter,
+    _sanitize_log_value,
     authenticate_token,
     get_current_client,
     require_role,
@@ -1269,3 +1270,162 @@ def test_api_concurrent_requests_respect_rate_limit(rate_limit_env):
 
     assert statuses.count(200) == 3
     assert statuses.count(429) == 9
+
+
+# ---------------------------------------------------------------------------
+# Phase 4: Security Hardening Regression Tests
+# ---------------------------------------------------------------------------
+
+
+def test_non_ascii_bearer_and_x_api_key_return_401_without_typeerror(auth_test_app):
+    """Non-ASCII header bytes must return HTTP 401 cleanly, never 500 TypeError."""
+    with TestClient(auth_test_app, raise_server_exceptions=False) as client:
+        r_bearer = client.get(
+            "/protected",
+            headers=[(b"authorization", b"Bearer caf\xe9-invalid-token")],
+        )
+        assert r_bearer.status_code == 401
+        assert r_bearer.headers.get("WWW-Authenticate") == "Bearer"
+        assert r_bearer.json() == {"detail": "Invalid authentication credentials."}
+
+        r_api_key = client.get(
+            "/protected",
+            headers=[(b"x-api-key", b"caf\xe9-invalid-key")],
+        )
+        assert r_api_key.status_code == 401
+        assert r_api_key.headers.get("WWW-Authenticate") == "Bearer"
+        assert r_api_key.json() == {"detail": "Invalid authentication credentials."}
+
+        r_both_conflict = client.get(
+            "/protected",
+            headers=[
+                (b"authorization", b"Bearer caf\xe9-one"),
+                (b"x-api-key", b"caf\xe9-two"),
+            ],
+        )
+        assert r_both_conflict.status_code == 401
+        assert r_both_conflict.headers.get("WWW-Authenticate") == "Bearer"
+        assert (
+            r_both_conflict.json()["detail"]
+            == "Conflicting authentication credentials supplied."
+        )
+
+
+def test_valid_configured_unicode_token_authenticates_cleanly(monkeypatch):
+    """Configured Unicode tokens work via constant-time UTF-8 comparison."""
+    unicode_token = "tokén-unicodé-🔐-123"
+    unicode_keys = (
+        ClientApiKeyConfig(
+            client_id="unicode-client",
+            token=SecretStr(unicode_token),
+            roles=("predict",),
+        ),
+    )
+
+    # Direct token verification (multi-byte UTF-8) succeeds without TypeError
+    matched = authenticate_token(unicode_token, configured_keys=unicode_keys)
+    assert matched is not None
+    assert matched.client_id == "unicode-client"
+    assert authenticate_token("café-wrong", configured_keys=unicode_keys) is None
+
+    # Dual-header and single-header HTTP requests with non-ASCII bytes fail closed
+    # with 401 cleanly (no 500 TypeError), even when configured keys contain Unicode.
+    monkeypatch.setattr("backend.app.api.security.settings.api_keys", unicode_keys)
+    unicode_app = FastAPI()
+
+    @unicode_app.get("/unicode-protected")
+    def unicode_protected(
+        client: AuthenticatedClient = Depends(get_current_client),
+    ):
+        return {"client_id": client.client_id}
+
+    with TestClient(unicode_app, raise_server_exceptions=False) as client:
+        r_non_ascii = client.get(
+            "/unicode-protected",
+            headers=[(b"x-api-key", b"tok\xe9n-non-ascii")],
+        )
+        assert r_non_ascii.status_code == 401
+        assert r_non_ascii.json() == {"detail": "Invalid authentication credentials."}
+
+
+def test_sanitize_log_value_neutralizes_control_chars_separators_and_length():
+    """_sanitize_log_value neutralizes control chars, separators, and long text."""
+    assert _sanitize_log_value("/retraining/jobs/job-123") == "/retraining/jobs/job-123"
+    assert _sanitize_log_value("127.0.0.1") == "127.0.0.1"
+
+    # ESC, NUL, DEL, tab, CR/LF, and Unicode line/paragraph separators
+    dirty = "a\x1b[31mb\x00c\x7fd\te\nf\rg\u0085h\u2028i\u2029j"
+    cleaned = _sanitize_log_value(dirty)
+    assert "\x1b" not in cleaned
+    assert "\x00" not in cleaned
+    assert "\x7f" not in cleaned
+    assert "\t" not in cleaned
+    assert "\n" not in cleaned
+    assert "\r" not in cleaned
+    assert "\u0085" not in cleaned
+    assert "\u2028" not in cleaned
+    assert "\u2029" not in cleaned
+
+    # Spaces and '=' delimiters must not allow key=value field injection
+    injected = "/retraining/jobs/x client_id=admin reason=bypass"
+    cleaned_injected = _sanitize_log_value(injected)
+    assert " " not in cleaned_injected
+    assert "=" not in cleaned_injected
+    assert "client_id=" not in cleaned_injected
+
+    # Oversized path bounded to max_length
+    oversized = "/" + ("a" * 500)
+    bounded = _sanitize_log_value(oversized, max_length=200)
+    assert len(bounded) == 200
+    assert bounded.endswith("...")
+
+
+def test_security_logs_sanitize_paths_and_never_leak_tokens(rbac_env, caplog):
+    """Auth, authz, and rate-limit logs neutralize injected paths & hide secrets."""
+    client = rbac_env["client"]
+    canary_secret = "canary-secret-token-should-never-log"
+
+    with caplog.at_level("WARNING", logger="backend.app.api.security"):
+        # Missing credentials with ESC, spaces, and injected key=value in path
+        r_unauth = client.get(
+            "/retraining/jobs/bad%1b%20client_id=admin%20auth_succeeded=true",
+        )
+        assert r_unauth.status_code == 401
+
+        # Invalid credentials with oversized path
+        oversized_segment = "z" * 400
+        r_invalid = client.get(
+            f"/retraining/jobs/{oversized_segment}",
+            headers={"Authorization": f"Bearer {canary_secret}"},
+        )
+        assert r_invalid.status_code == 401
+
+        # Authorization failure (403) with injected path text
+        r_forbidden = client.get(
+            "/retraining/jobs/job%20role=admin",
+            headers={"Authorization": f"Bearer {TEST_PREDICT_TOKEN}"},
+        )
+        assert r_forbidden.status_code == 403
+
+    log_text = caplog.text
+    assert "\x1b" not in log_text
+    assert " client_id=admin" not in log_text
+    assert " auth_succeeded=true" not in log_text
+    assert " role=admin" not in log_text
+    assert canary_secret not in log_text
+    assert TEST_PREDICT_TOKEN not in log_text
+    assert oversized_segment not in log_text
+    assert "..." in log_text
+
+
+def test_padded_configured_token_authenticates_consistently(monkeypatch):
+    """Tokens with whitespace padding in config normalize consistently for auth."""
+    payload = (
+        '[{"client_id": "padded-client", '
+        '"token": "  padded-secret-xyz  ", "roles": ["predict"]}]'
+    )
+    monkeypatch.setenv("MODELFORGE_API_KEYS", payload)
+    loaded = Settings(_env_file=None)
+    matched = authenticate_token("padded-secret-xyz", configured_keys=loaded.api_keys)
+    assert matched is not None
+    assert matched.client_id == "padded-client"

@@ -17,12 +17,12 @@ This document provides a live tracking record of engineering milestones, phase i
 | **Milestone 7** | Promotion Traceability & Auditability | Completed | Dataset provenance, benchmark gate integrity, and SQLite audit records implemented. |
 | **Milestone 8** | Read-Only Promotion Audit API | Completed | `GET /audit/promotions` endpoint, Pydantic schemas, and error isolation. |
 | **Milestone 9** | Controlled Drift Response & Retraining Orchestration | Completed | All Phases 6A–6G.1 and Live Docker Compose Validation Complete. |
-| **Milestone 10** | API Auth, Authorization & Rate Limiting | In Progress | Phase 1 (Authentication Foundation) and Phase 2 (RBAC & Endpoint Protection) complete; Phase 3 (Rate Limiting) pending. |
+| **Milestone 10** | API Auth, Authorization & Rate Limiting | Completed | Phases 1–4 complete (auth, RBAC, sliding-window rate limiting, security hardening, docs, Compose validation, and 530-test full suite pass). |
 | **Milestone 11** | Persistence & Concurrency Evaluation | Proposed | Planned future engineering work. |
 
 ---
 
-## Milestone 10: API Authentication, Authorization & Rate Limiting (In Progress)
+## Milestone 10: API Authentication, Authorization & Rate Limiting (Completed)
 
 ### Phase Progress Breakdown
 
@@ -30,7 +30,15 @@ This document provides a live tracking record of engineering milestones, phase i
 |---|---|---|---|
 | **Phase 1** | Authentication Foundation | **Completed** | Dual-header (`Authorization: Bearer` / `X-API-Key`) validation, constant-time token comparison, conflicting-header rejection, and sanitized 401 responses (`backend/app/api/security.py`, `backend/app/config.py`). |
 | **Phase 2** | RBAC & Endpoint Protection | **Completed** | `require_role` dependency, endpoint-to-role bindings on `/predict`, `/monitoring/drift`, `/monitoring/drift/assess`, `/audit/promotions`, `/retraining/jobs/active`, `/retraining/jobs/{job_id}`, `admin` wildcard access, public health/metrics routes, OpenAPI security schemes, and `docs/API_SECURITY.md`. |
-| **Phase 3** | Rate Limiting | Pending | Not yet implemented. |
+| **Phase 3** | Rate Limiting | **Completed** | `SlidingWindowRateLimiter` and `enforce_rate_limit` enforcing per-`client_id` sliding-window quotas after auth/RBAC, returning HTTP 429 with integer `Retry-After`, and pruning inactive clients. |
+| **Phase 4** | Security Hardening & Final Acceptance | **Completed** | Audit remediation (UTF-8 constant-time comparison, `_sanitize_log_value` log sanitization, `ClientApiKeyConfig` token whitespace normalization, `api`-only Compose env forwarding), 94 security/config tests, 530 full-suite tests, Ruff lint/format, OpenAPI & Compose config validation, and P95 overhead benchmark (`0.8110 ms` `TestClient` delta / `0.0034 ms` direct). |
+
+### M10 Verification Snapshot
+- **Focused Security & Config Tests**: `.venv/bin/pytest tests/test_api_security.py tests/test_config.py -v` → **94 passed**
+- **API & Retraining Metrics Tests**: `.venv/bin/pytest tests/test_api.py tests/test_api_jobs.py tests/test_retraining_metrics.py -q` → **86 passed**
+- **Full Regression Suite**: `.venv/bin/pytest -q` → **530 passed, 1 pre-existing MLflow `SADeprecationWarning`**
+- **Static Analysis**: `.venv/bin/ruff check .` → **All checks passed**; `.venv/bin/ruff format --check .` → **77 files already formatted**
+- **Compose Config Validation**: `docker compose config --quiet` → **Passed** (Docker daemon unavailable in sandboxed verification environment for live container runtime check)
 
 ---
 
