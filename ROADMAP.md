@@ -23,7 +23,9 @@ This document outlines the milestones established during the AI Engineering audi
 
 ## In Progress Engineering Milestones
 
-*None — Milestone 10 is complete; Milestone 11 and ModelForge 1.0 release verification remain pending.*
+| Milestone | Title | Status | Description |
+|---|---|---|---|
+| **Milestone 11** | Persistence and Concurrency Evaluation (with Justified PostgreSQL Migration) | In Progress | Evaluating SQLite concurrency limits and lock contention across workloads W1–W6 and P1; Phase 1 architecture audit approved; Phase 2 benchmark harness and DELETE-mode baseline in progress. |
 
 ---
 
@@ -31,9 +33,7 @@ This document outlines the milestones established during the AI Engineering audi
 
 > **Note**: The following proposed milestones represent planned future engineering work and are not yet implemented. All proposed work is subject to prioritization, scoping, and empirical evaluation. ModelForge remains a local development stack and does not claim production readiness.
 
-| Milestone | Title | Status | Description |
-|---|---|---|---|
-| **Milestone 11** | Persistence and Concurrency Evaluation (with Justified PostgreSQL Migration) | Proposed | Benchmark SQLite concurrency and lock contention under multi-worker loads; execute a structured migration to PostgreSQL only if justified by empirical performance data. |
+*None pending — Milestone 11 is currently active in the engineering pipeline.*
 
 ---
 
@@ -260,22 +260,35 @@ Implement a standards-compliant authentication, role-based authorization, and ra
 
 ---
 
-> **Status for Milestone 11: Proposed / Unscheduled.**<br>
-> The following scope describes proposed technical enhancements not yet implemented, subject to engineering prioritization, capacity, and empirical validation. ModelForge remains a local development stack and does not claim production readiness.
+> **Status for Milestone 11: In Progress.**<br>
+> Phase 1 architecture audit has been reviewed and approved. Phase 2 benchmark harness implementation and baseline establishment under DELETE journal mode is currently in progress. ModelForge remains a local development stack and does not claim production readiness.
 
 ---
 
-### Proposed Milestone 11: Persistence and Concurrency Evaluation (with Justified PostgreSQL Migration)
+### Milestone 11: Persistence and Concurrency Evaluation (with Justified PostgreSQL Migration)
 
 #### Objective
 Empirically evaluate SQLite concurrency limits, lock contention, and transaction throughput under multi-client loads across MLflow tracking and audit databases, executing a migration to PostgreSQL only if substantiated by empirical workload evidence.
 
-#### Proposed Scope
-- **Empirical Concurrency Benchmarking**: Build automated load-test harness simulating concurrent MLflow parameter/metric logging, candidate promotion attempts, and audit queries across 1, 5, 10, and 25 concurrent worker threads/processes.
-- **Decision Threshold Matrix**: Establish explicit empirical criteria (e.g. SQLite lock contention error rate $> 0.1\%$ or P95 write latency $> 500\text{ms}$ under expected workload) that must be met before initiating database migration.
-- **Pragmas & Optimization Evaluation**: Evaluate SQLite tuning (WAL mode, busy timeout adjustments) before declaring migration necessary.
-- **Database Abstraction & Migration Tooling (Conditional)**: If and only if the decision threshold is breached, introduce SQLAlchemy/Alembic migrations, PostgreSQL container provisioning in Compose, and connection pooling.
-- **Dual-Store Data Parity & Migration Script**: If migrated, provide migration tooling to transfer existing `promotion_audit` and `lifecycle_audit` records from SQLite to PostgreSQL with row count and cryptographic digest verification.
+#### Revised Phase Sequence
+- **Phase 1 — Architecture & Transaction Audit** *(Completed & Approved)*: Audited `db_connection()`, isolation levels, autocommit semantics, write locking (`BEGIN IMMEDIATE`), schema triggers, and single-worker deployment invariants.
+- **Phase 2 — Benchmark Harness & Baseline Establishment** *(In Progress — Baseline Completed)*: Built reproducible benchmark harness (`benchmarks/m11/`) supporting thread concurrency (1, 5, 10, 25), process concurrency (1, 2, 4), and 7 distinct workload scenarios (W1–W6, P1); baseline DELETE journal mode performance measured with 5000ms busy timeout on isolated temporary databases (81/81 runs passed integrity checks). Awaiting review before Phase 3.
+- **Phase 3 — SQLite Optimization & PRAGMA Evaluation** *(Planned)*: Evaluate SQLite tuning (WAL journal mode, busy timeout tuning, synchronous pragmas) before determining if migration is necessary.
+- **Phase 4 — Architectural Decision Gate & Conditional PostgreSQL Migration** *(Conditional / Planned)*: If and only if the empirical decision threshold is breached, introduce PostgreSQL containerization, SQLAlchemy/Alembic migrations, and data parity transfer tooling.
+- **Phase 5 — Full Stack Acceptance & Verification** *(Planned)*: Zero-regression verification across full test suite, concurrency resilience validation, and updated documentation.
+
+#### Workload Scenarios Matrix
+- **W1 (Job claim contention)**: Multi-worker race on `claim_queued_job` and job state finalization.
+- **W2 (Heartbeat write contention)**: Concurrent heartbeat updates (`record_worker_heartbeat`) and lease extensions (`heartbeat_job`).
+- **W3 (Concurrent drift assessments)**: Concurrent immutable drift alert creation (`record_drift_alert`).
+- **W4 (Combined write-heavy workload)**: Interleaved drift alerts, lifecycle runs, and promotion audits.
+- **W5 (Read-heavy metrics queries during writes)**: Concurrent audit reads during continuous lifecycle writes (evaluating DELETE mode read-write lock contention).
+- **W6 (Promotion audit writes)**: Concurrent promotion decision records (`record_promotion_audit`).
+- **P1 (Cross-process contention)**: Multi-process worker contention (1, 2, 4 processes) exercising full job lifecycle.
+
+#### Decision Threshold Matrix
+- SQLite lock contention error rate $> 0.1\%$ or P95 write latency $> 500\text{ms}$ under expected workload.
+- Structural corruption, database lockouts, or unrecoverable concurrency failures.
 
 #### Measurable Acceptance Criteria
 1. **Published benchmark report**: Comprehensive benchmark dataset documenting transaction rates, P50/P95/P99 latency, and `sqlite3.OperationalError: database is locked` frequency across worker concurrency levels.

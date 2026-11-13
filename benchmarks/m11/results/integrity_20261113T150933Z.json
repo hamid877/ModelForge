@@ -1,0 +1,1136 @@
+[
+  {
+    "scenario": "W1",
+    "concurrency_type": "thread",
+    "concurrency": 1,
+    "repetition": 1,
+    "ok": true,
+    "details": [
+      "integrity_check: ok",
+      "foreign_key_check: ok",
+      "triggers: all 6 present",
+      "partial_index: idx_single_active_retraining_job present"
+    ],
+    "stop": false
+  },
+  {
+    "scenario": "W1",
+    "concurrency_type": "thread",
+    "concurrency": 1,
+    "repetition": 2,
+    "ok": true,
+    "details": [
+      "integrity_check: ok",
+      "foreign_key_check: ok",
+      "triggers: all 6 present",
+      "partial_index: idx_single_active_retraining_job present"
+    ],
+    "stop": false
+  },
+  {
+    "scenario": "W1",
+    "concurrency_type": "thread",
+    "concurrency": 1,
+    "repetition": 3,
+    "ok": true,
+    "details": [
+      "integrity_check: ok",
+      "foreign_key_check: ok",
+      "triggers: all 6 present",
+      "partial_index: idx_single_active_retraining_job present"
+    ],
+    "stop": false
+  },
+  {
+    "scenario": "W1",
+    "concurrency_type": "thread",
+    "concurrency": 5,
+    "repetition": 1,
+    "ok": true,
+    "details": [
+      "integrity_check: ok",
+      "foreign_key_check: ok",
+      "triggers: all 6 present",
+      "partial_index: idx_single_active_retraining_job present"
+    ],
+    "stop": false
+  },
+  {
+    "scenario": "W1",
+    "concurrency_type": "thread",
+    "concurrency": 5,
+    "repetition": 2,
+    "ok": true,
+    "details": [
+      "integrity_check: ok",
+      "foreign_key_check: ok",
+      "triggers: all 6 present",
+      "partial_index: idx_single_active_retraining_job present"
+    ],
+    "stop": false
+  },
+  {
+    "scenario": "W1",
+    "concurrency_type": "thread",
+    "concurrency": 5,
+    "repetition": 3,
+    "ok": true,
+    "details": [
+      "integrity_check: ok",
+      "foreign_key_check: ok",
+      "triggers: all 6 present",
+      "partial_index: idx_single_active_retraining_job present"
+    ],
+    "stop": false
+  },
+  {
+    "scenario": "W1",
+    "concurrency_type": "thread",
+    "concurrency": 10,
+    "repetition": 1,
+    "ok": true,
+    "details": [
+      "integrity_check: ok",
+      "foreign_key_check: ok",
+      "triggers: all 6 present",
+      "partial_index: idx_single_active_retraining_job present"
+    ],
+    "stop": false
+  },
+  {
+    "scenario": "W1",
+    "concurrency_type": "thread",
+    "concurrency": 10,
+    "repetition": 2,
+    "ok": true,
+    "details": [
+      "integrity_check: ok",
+      "foreign_key_check: ok",
+      "triggers: all 6 present",
+      "partial_index: idx_single_active_retraining_job present"
+    ],
+    "stop": false
+  },
+  {
+    "scenario": "W1",
+    "concurrency_type": "thread",
+    "concurrency": 10,
+    "repetition": 3,
+    "ok": true,
+    "details": [
+      "integrity_check: ok",
+      "foreign_key_check: ok",
+      "triggers: all 6 present",
+      "partial_index: idx_single_active_retraining_job present"
+    ],
+    "stop": false
+  },
+  {
+    "scenario": "W1",
+    "concurrency_type": "thread",
+    "concurrency": 25,
+    "repetition": 1,
+    "ok": true,
+    "details": [
+      "integrity_check: ok",
+      "foreign_key_check: ok",
+      "triggers: all 6 present",
+      "partial_index: idx_single_active_retraining_job present"
+    ],
+    "stop": false
+  },
+  {
+    "scenario": "W1",
+    "concurrency_type": "thread",
+    "concurrency": 25,
+    "repetition": 2,
+    "ok": true,
+    "details": [
+      "integrity_check: ok",
+      "foreign_key_check: ok",
+      "triggers: all 6 present",
+      "partial_index: idx_single_active_retraining_job present"
+    ],
+    "stop": false
+  },
+  {
+    "scenario": "W1",
+    "concurrency_type": "thread",
+    "concurrency": 25,
+    "repetition": 3,
+    "ok": true,
+    "details": [
+      "integrity_check: ok",
+      "foreign_key_check: ok",
+      "triggers: all 6 present",
+      "partial_index: idx_single_active_retraining_job present"
+    ],
+    "stop": false
+  },
+  {
+    "scenario": "W2",
+    "concurrency_type": "thread",
+    "concurrency": 1,
+    "repetition": 1,
+    "ok": true,
+    "details": [
+      "integrity_check: ok",
+      "foreign_key_check: ok",
+      "triggers: all 6 present",
+      "partial_index: idx_single_active_retraining_job present"
+    ],
+    "stop": false
+  },
+  {
+    "scenario": "W2",
+    "concurrency_type": "thread",
+    "concurrency": 1,
+    "repetition": 2,
+    "ok": true,
+    "details": [
+      "integrity_check: ok",
+      "foreign_key_check: ok",
+      "triggers: all 6 present",
+      "partial_index: idx_single_active_retraining_job present"
+    ],
+    "stop": false
+  },
+  {
+    "scenario": "W2",
+    "concurrency_type": "thread",
+    "concurrency": 1,
+    "repetition": 3,
+    "ok": true,
+    "details": [
+      "integrity_check: ok",
+      "foreign_key_check: ok",
+      "triggers: all 6 present",
+      "partial_index: idx_single_active_retraining_job present"
+    ],
+    "stop": false
+  },
+  {
+    "scenario": "W2",
+    "concurrency_type": "thread",
+    "concurrency": 5,
+    "repetition": 1,
+    "ok": true,
+    "details": [
+      "integrity_check: ok",
+      "foreign_key_check: ok",
+      "triggers: all 6 present",
+      "partial_index: idx_single_active_retraining_job present"
+    ],
+    "stop": false
+  },
+  {
+    "scenario": "W2",
+    "concurrency_type": "thread",
+    "concurrency": 5,
+    "repetition": 2,
+    "ok": true,
+    "details": [
+      "integrity_check: ok",
+      "foreign_key_check: ok",
+      "triggers: all 6 present",
+      "partial_index: idx_single_active_retraining_job present"
+    ],
+    "stop": false
+  },
+  {
+    "scenario": "W2",
+    "concurrency_type": "thread",
+    "concurrency": 5,
+    "repetition": 3,
+    "ok": true,
+    "details": [
+      "integrity_check: ok",
+      "foreign_key_check: ok",
+      "triggers: all 6 present",
+      "partial_index: idx_single_active_retraining_job present"
+    ],
+    "stop": false
+  },
+  {
+    "scenario": "W2",
+    "concurrency_type": "thread",
+    "concurrency": 10,
+    "repetition": 1,
+    "ok": true,
+    "details": [
+      "integrity_check: ok",
+      "foreign_key_check: ok",
+      "triggers: all 6 present",
+      "partial_index: idx_single_active_retraining_job present"
+    ],
+    "stop": false
+  },
+  {
+    "scenario": "W2",
+    "concurrency_type": "thread",
+    "concurrency": 10,
+    "repetition": 2,
+    "ok": true,
+    "details": [
+      "integrity_check: ok",
+      "foreign_key_check: ok",
+      "triggers: all 6 present",
+      "partial_index: idx_single_active_retraining_job present"
+    ],
+    "stop": false
+  },
+  {
+    "scenario": "W2",
+    "concurrency_type": "thread",
+    "concurrency": 10,
+    "repetition": 3,
+    "ok": true,
+    "details": [
+      "integrity_check: ok",
+      "foreign_key_check: ok",
+      "triggers: all 6 present",
+      "partial_index: idx_single_active_retraining_job present"
+    ],
+    "stop": false
+  },
+  {
+    "scenario": "W2",
+    "concurrency_type": "thread",
+    "concurrency": 25,
+    "repetition": 1,
+    "ok": true,
+    "details": [
+      "integrity_check: ok",
+      "foreign_key_check: ok",
+      "triggers: all 6 present",
+      "partial_index: idx_single_active_retraining_job present"
+    ],
+    "stop": false
+  },
+  {
+    "scenario": "W2",
+    "concurrency_type": "thread",
+    "concurrency": 25,
+    "repetition": 2,
+    "ok": true,
+    "details": [
+      "integrity_check: ok",
+      "foreign_key_check: ok",
+      "triggers: all 6 present",
+      "partial_index: idx_single_active_retraining_job present"
+    ],
+    "stop": false
+  },
+  {
+    "scenario": "W2",
+    "concurrency_type": "thread",
+    "concurrency": 25,
+    "repetition": 3,
+    "ok": true,
+    "details": [
+      "integrity_check: ok",
+      "foreign_key_check: ok",
+      "triggers: all 6 present",
+      "partial_index: idx_single_active_retraining_job present"
+    ],
+    "stop": false
+  },
+  {
+    "scenario": "W3",
+    "concurrency_type": "thread",
+    "concurrency": 1,
+    "repetition": 1,
+    "ok": true,
+    "details": [
+      "integrity_check: ok",
+      "foreign_key_check: ok",
+      "triggers: all 6 present",
+      "partial_index: idx_single_active_retraining_job present"
+    ],
+    "stop": false
+  },
+  {
+    "scenario": "W3",
+    "concurrency_type": "thread",
+    "concurrency": 1,
+    "repetition": 2,
+    "ok": true,
+    "details": [
+      "integrity_check: ok",
+      "foreign_key_check: ok",
+      "triggers: all 6 present",
+      "partial_index: idx_single_active_retraining_job present"
+    ],
+    "stop": false
+  },
+  {
+    "scenario": "W3",
+    "concurrency_type": "thread",
+    "concurrency": 1,
+    "repetition": 3,
+    "ok": true,
+    "details": [
+      "integrity_check: ok",
+      "foreign_key_check: ok",
+      "triggers: all 6 present",
+      "partial_index: idx_single_active_retraining_job present"
+    ],
+    "stop": false
+  },
+  {
+    "scenario": "W3",
+    "concurrency_type": "thread",
+    "concurrency": 5,
+    "repetition": 1,
+    "ok": true,
+    "details": [
+      "integrity_check: ok",
+      "foreign_key_check: ok",
+      "triggers: all 6 present",
+      "partial_index: idx_single_active_retraining_job present"
+    ],
+    "stop": false
+  },
+  {
+    "scenario": "W3",
+    "concurrency_type": "thread",
+    "concurrency": 5,
+    "repetition": 2,
+    "ok": true,
+    "details": [
+      "integrity_check: ok",
+      "foreign_key_check: ok",
+      "triggers: all 6 present",
+      "partial_index: idx_single_active_retraining_job present"
+    ],
+    "stop": false
+  },
+  {
+    "scenario": "W3",
+    "concurrency_type": "thread",
+    "concurrency": 5,
+    "repetition": 3,
+    "ok": true,
+    "details": [
+      "integrity_check: ok",
+      "foreign_key_check: ok",
+      "triggers: all 6 present",
+      "partial_index: idx_single_active_retraining_job present"
+    ],
+    "stop": false
+  },
+  {
+    "scenario": "W3",
+    "concurrency_type": "thread",
+    "concurrency": 10,
+    "repetition": 1,
+    "ok": true,
+    "details": [
+      "integrity_check: ok",
+      "foreign_key_check: ok",
+      "triggers: all 6 present",
+      "partial_index: idx_single_active_retraining_job present"
+    ],
+    "stop": false
+  },
+  {
+    "scenario": "W3",
+    "concurrency_type": "thread",
+    "concurrency": 10,
+    "repetition": 2,
+    "ok": true,
+    "details": [
+      "integrity_check: ok",
+      "foreign_key_check: ok",
+      "triggers: all 6 present",
+      "partial_index: idx_single_active_retraining_job present"
+    ],
+    "stop": false
+  },
+  {
+    "scenario": "W3",
+    "concurrency_type": "thread",
+    "concurrency": 10,
+    "repetition": 3,
+    "ok": true,
+    "details": [
+      "integrity_check: ok",
+      "foreign_key_check: ok",
+      "triggers: all 6 present",
+      "partial_index: idx_single_active_retraining_job present"
+    ],
+    "stop": false
+  },
+  {
+    "scenario": "W3",
+    "concurrency_type": "thread",
+    "concurrency": 25,
+    "repetition": 1,
+    "ok": true,
+    "details": [
+      "integrity_check: ok",
+      "foreign_key_check: ok",
+      "triggers: all 6 present",
+      "partial_index: idx_single_active_retraining_job present"
+    ],
+    "stop": false
+  },
+  {
+    "scenario": "W3",
+    "concurrency_type": "thread",
+    "concurrency": 25,
+    "repetition": 2,
+    "ok": true,
+    "details": [
+      "integrity_check: ok",
+      "foreign_key_check: ok",
+      "triggers: all 6 present",
+      "partial_index: idx_single_active_retraining_job present"
+    ],
+    "stop": false
+  },
+  {
+    "scenario": "W3",
+    "concurrency_type": "thread",
+    "concurrency": 25,
+    "repetition": 3,
+    "ok": true,
+    "details": [
+      "integrity_check: ok",
+      "foreign_key_check: ok",
+      "triggers: all 6 present",
+      "partial_index: idx_single_active_retraining_job present"
+    ],
+    "stop": false
+  },
+  {
+    "scenario": "W4",
+    "concurrency_type": "thread",
+    "concurrency": 1,
+    "repetition": 1,
+    "ok": true,
+    "details": [
+      "integrity_check: ok",
+      "foreign_key_check: ok",
+      "triggers: all 6 present",
+      "partial_index: idx_single_active_retraining_job present"
+    ],
+    "stop": false
+  },
+  {
+    "scenario": "W4",
+    "concurrency_type": "thread",
+    "concurrency": 1,
+    "repetition": 2,
+    "ok": true,
+    "details": [
+      "integrity_check: ok",
+      "foreign_key_check: ok",
+      "triggers: all 6 present",
+      "partial_index: idx_single_active_retraining_job present"
+    ],
+    "stop": false
+  },
+  {
+    "scenario": "W4",
+    "concurrency_type": "thread",
+    "concurrency": 1,
+    "repetition": 3,
+    "ok": true,
+    "details": [
+      "integrity_check: ok",
+      "foreign_key_check: ok",
+      "triggers: all 6 present",
+      "partial_index: idx_single_active_retraining_job present"
+    ],
+    "stop": false
+  },
+  {
+    "scenario": "W4",
+    "concurrency_type": "thread",
+    "concurrency": 5,
+    "repetition": 1,
+    "ok": true,
+    "details": [
+      "integrity_check: ok",
+      "foreign_key_check: ok",
+      "triggers: all 6 present",
+      "partial_index: idx_single_active_retraining_job present"
+    ],
+    "stop": false
+  },
+  {
+    "scenario": "W4",
+    "concurrency_type": "thread",
+    "concurrency": 5,
+    "repetition": 2,
+    "ok": true,
+    "details": [
+      "integrity_check: ok",
+      "foreign_key_check: ok",
+      "triggers: all 6 present",
+      "partial_index: idx_single_active_retraining_job present"
+    ],
+    "stop": false
+  },
+  {
+    "scenario": "W4",
+    "concurrency_type": "thread",
+    "concurrency": 5,
+    "repetition": 3,
+    "ok": true,
+    "details": [
+      "integrity_check: ok",
+      "foreign_key_check: ok",
+      "triggers: all 6 present",
+      "partial_index: idx_single_active_retraining_job present"
+    ],
+    "stop": false
+  },
+  {
+    "scenario": "W4",
+    "concurrency_type": "thread",
+    "concurrency": 10,
+    "repetition": 1,
+    "ok": true,
+    "details": [
+      "integrity_check: ok",
+      "foreign_key_check: ok",
+      "triggers: all 6 present",
+      "partial_index: idx_single_active_retraining_job present"
+    ],
+    "stop": false
+  },
+  {
+    "scenario": "W4",
+    "concurrency_type": "thread",
+    "concurrency": 10,
+    "repetition": 2,
+    "ok": true,
+    "details": [
+      "integrity_check: ok",
+      "foreign_key_check: ok",
+      "triggers: all 6 present",
+      "partial_index: idx_single_active_retraining_job present"
+    ],
+    "stop": false
+  },
+  {
+    "scenario": "W4",
+    "concurrency_type": "thread",
+    "concurrency": 10,
+    "repetition": 3,
+    "ok": true,
+    "details": [
+      "integrity_check: ok",
+      "foreign_key_check: ok",
+      "triggers: all 6 present",
+      "partial_index: idx_single_active_retraining_job present"
+    ],
+    "stop": false
+  },
+  {
+    "scenario": "W4",
+    "concurrency_type": "thread",
+    "concurrency": 25,
+    "repetition": 1,
+    "ok": true,
+    "details": [
+      "integrity_check: ok",
+      "foreign_key_check: ok",
+      "triggers: all 6 present",
+      "partial_index: idx_single_active_retraining_job present"
+    ],
+    "stop": false
+  },
+  {
+    "scenario": "W4",
+    "concurrency_type": "thread",
+    "concurrency": 25,
+    "repetition": 2,
+    "ok": true,
+    "details": [
+      "integrity_check: ok",
+      "foreign_key_check: ok",
+      "triggers: all 6 present",
+      "partial_index: idx_single_active_retraining_job present"
+    ],
+    "stop": false
+  },
+  {
+    "scenario": "W4",
+    "concurrency_type": "thread",
+    "concurrency": 25,
+    "repetition": 3,
+    "ok": true,
+    "details": [
+      "integrity_check: ok",
+      "foreign_key_check: ok",
+      "triggers: all 6 present",
+      "partial_index: idx_single_active_retraining_job present"
+    ],
+    "stop": false
+  },
+  {
+    "scenario": "W5",
+    "concurrency_type": "thread",
+    "concurrency": 1,
+    "repetition": 1,
+    "ok": true,
+    "details": [
+      "integrity_check: ok",
+      "foreign_key_check: ok",
+      "triggers: all 6 present",
+      "partial_index: idx_single_active_retraining_job present"
+    ],
+    "stop": false
+  },
+  {
+    "scenario": "W5",
+    "concurrency_type": "thread",
+    "concurrency": 1,
+    "repetition": 2,
+    "ok": true,
+    "details": [
+      "integrity_check: ok",
+      "foreign_key_check: ok",
+      "triggers: all 6 present",
+      "partial_index: idx_single_active_retraining_job present"
+    ],
+    "stop": false
+  },
+  {
+    "scenario": "W5",
+    "concurrency_type": "thread",
+    "concurrency": 1,
+    "repetition": 3,
+    "ok": true,
+    "details": [
+      "integrity_check: ok",
+      "foreign_key_check: ok",
+      "triggers: all 6 present",
+      "partial_index: idx_single_active_retraining_job present"
+    ],
+    "stop": false
+  },
+  {
+    "scenario": "W5",
+    "concurrency_type": "thread",
+    "concurrency": 5,
+    "repetition": 1,
+    "ok": true,
+    "details": [
+      "integrity_check: ok",
+      "foreign_key_check: ok",
+      "triggers: all 6 present",
+      "partial_index: idx_single_active_retraining_job present"
+    ],
+    "stop": false
+  },
+  {
+    "scenario": "W5",
+    "concurrency_type": "thread",
+    "concurrency": 5,
+    "repetition": 2,
+    "ok": true,
+    "details": [
+      "integrity_check: ok",
+      "foreign_key_check: ok",
+      "triggers: all 6 present",
+      "partial_index: idx_single_active_retraining_job present"
+    ],
+    "stop": false
+  },
+  {
+    "scenario": "W5",
+    "concurrency_type": "thread",
+    "concurrency": 5,
+    "repetition": 3,
+    "ok": true,
+    "details": [
+      "integrity_check: ok",
+      "foreign_key_check: ok",
+      "triggers: all 6 present",
+      "partial_index: idx_single_active_retraining_job present"
+    ],
+    "stop": false
+  },
+  {
+    "scenario": "W5",
+    "concurrency_type": "thread",
+    "concurrency": 10,
+    "repetition": 1,
+    "ok": true,
+    "details": [
+      "integrity_check: ok",
+      "foreign_key_check: ok",
+      "triggers: all 6 present",
+      "partial_index: idx_single_active_retraining_job present"
+    ],
+    "stop": false
+  },
+  {
+    "scenario": "W5",
+    "concurrency_type": "thread",
+    "concurrency": 10,
+    "repetition": 2,
+    "ok": true,
+    "details": [
+      "integrity_check: ok",
+      "foreign_key_check: ok",
+      "triggers: all 6 present",
+      "partial_index: idx_single_active_retraining_job present"
+    ],
+    "stop": false
+  },
+  {
+    "scenario": "W5",
+    "concurrency_type": "thread",
+    "concurrency": 10,
+    "repetition": 3,
+    "ok": true,
+    "details": [
+      "integrity_check: ok",
+      "foreign_key_check: ok",
+      "triggers: all 6 present",
+      "partial_index: idx_single_active_retraining_job present"
+    ],
+    "stop": false
+  },
+  {
+    "scenario": "W5",
+    "concurrency_type": "thread",
+    "concurrency": 25,
+    "repetition": 1,
+    "ok": true,
+    "details": [
+      "integrity_check: ok",
+      "foreign_key_check: ok",
+      "triggers: all 6 present",
+      "partial_index: idx_single_active_retraining_job present"
+    ],
+    "stop": false
+  },
+  {
+    "scenario": "W5",
+    "concurrency_type": "thread",
+    "concurrency": 25,
+    "repetition": 2,
+    "ok": true,
+    "details": [
+      "integrity_check: ok",
+      "foreign_key_check: ok",
+      "triggers: all 6 present",
+      "partial_index: idx_single_active_retraining_job present"
+    ],
+    "stop": false
+  },
+  {
+    "scenario": "W5",
+    "concurrency_type": "thread",
+    "concurrency": 25,
+    "repetition": 3,
+    "ok": true,
+    "details": [
+      "integrity_check: ok",
+      "foreign_key_check: ok",
+      "triggers: all 6 present",
+      "partial_index: idx_single_active_retraining_job present"
+    ],
+    "stop": false
+  },
+  {
+    "scenario": "W6",
+    "concurrency_type": "thread",
+    "concurrency": 1,
+    "repetition": 1,
+    "ok": true,
+    "details": [
+      "integrity_check: ok",
+      "foreign_key_check: ok",
+      "triggers: all 6 present",
+      "partial_index: idx_single_active_retraining_job present"
+    ],
+    "stop": false
+  },
+  {
+    "scenario": "W6",
+    "concurrency_type": "thread",
+    "concurrency": 1,
+    "repetition": 2,
+    "ok": true,
+    "details": [
+      "integrity_check: ok",
+      "foreign_key_check: ok",
+      "triggers: all 6 present",
+      "partial_index: idx_single_active_retraining_job present"
+    ],
+    "stop": false
+  },
+  {
+    "scenario": "W6",
+    "concurrency_type": "thread",
+    "concurrency": 1,
+    "repetition": 3,
+    "ok": true,
+    "details": [
+      "integrity_check: ok",
+      "foreign_key_check: ok",
+      "triggers: all 6 present",
+      "partial_index: idx_single_active_retraining_job present"
+    ],
+    "stop": false
+  },
+  {
+    "scenario": "W6",
+    "concurrency_type": "thread",
+    "concurrency": 5,
+    "repetition": 1,
+    "ok": true,
+    "details": [
+      "integrity_check: ok",
+      "foreign_key_check: ok",
+      "triggers: all 6 present",
+      "partial_index: idx_single_active_retraining_job present"
+    ],
+    "stop": false
+  },
+  {
+    "scenario": "W6",
+    "concurrency_type": "thread",
+    "concurrency": 5,
+    "repetition": 2,
+    "ok": true,
+    "details": [
+      "integrity_check: ok",
+      "foreign_key_check: ok",
+      "triggers: all 6 present",
+      "partial_index: idx_single_active_retraining_job present"
+    ],
+    "stop": false
+  },
+  {
+    "scenario": "W6",
+    "concurrency_type": "thread",
+    "concurrency": 5,
+    "repetition": 3,
+    "ok": true,
+    "details": [
+      "integrity_check: ok",
+      "foreign_key_check: ok",
+      "triggers: all 6 present",
+      "partial_index: idx_single_active_retraining_job present"
+    ],
+    "stop": false
+  },
+  {
+    "scenario": "W6",
+    "concurrency_type": "thread",
+    "concurrency": 10,
+    "repetition": 1,
+    "ok": true,
+    "details": [
+      "integrity_check: ok",
+      "foreign_key_check: ok",
+      "triggers: all 6 present",
+      "partial_index: idx_single_active_retraining_job present"
+    ],
+    "stop": false
+  },
+  {
+    "scenario": "W6",
+    "concurrency_type": "thread",
+    "concurrency": 10,
+    "repetition": 2,
+    "ok": true,
+    "details": [
+      "integrity_check: ok",
+      "foreign_key_check: ok",
+      "triggers: all 6 present",
+      "partial_index: idx_single_active_retraining_job present"
+    ],
+    "stop": false
+  },
+  {
+    "scenario": "W6",
+    "concurrency_type": "thread",
+    "concurrency": 10,
+    "repetition": 3,
+    "ok": true,
+    "details": [
+      "integrity_check: ok",
+      "foreign_key_check: ok",
+      "triggers: all 6 present",
+      "partial_index: idx_single_active_retraining_job present"
+    ],
+    "stop": false
+  },
+  {
+    "scenario": "W6",
+    "concurrency_type": "thread",
+    "concurrency": 25,
+    "repetition": 1,
+    "ok": true,
+    "details": [
+      "integrity_check: ok",
+      "foreign_key_check: ok",
+      "triggers: all 6 present",
+      "partial_index: idx_single_active_retraining_job present"
+    ],
+    "stop": false
+  },
+  {
+    "scenario": "W6",
+    "concurrency_type": "thread",
+    "concurrency": 25,
+    "repetition": 2,
+    "ok": true,
+    "details": [
+      "integrity_check: ok",
+      "foreign_key_check: ok",
+      "triggers: all 6 present",
+      "partial_index: idx_single_active_retraining_job present"
+    ],
+    "stop": false
+  },
+  {
+    "scenario": "W6",
+    "concurrency_type": "thread",
+    "concurrency": 25,
+    "repetition": 3,
+    "ok": true,
+    "details": [
+      "integrity_check: ok",
+      "foreign_key_check: ok",
+      "triggers: all 6 present",
+      "partial_index: idx_single_active_retraining_job present"
+    ],
+    "stop": false
+  },
+  {
+    "scenario": "P1",
+    "concurrency_type": "process",
+    "concurrency": 1,
+    "repetition": 1,
+    "ok": true,
+    "details": [
+      "integrity_check: ok",
+      "foreign_key_check: ok",
+      "triggers: all 6 present",
+      "partial_index: idx_single_active_retraining_job present"
+    ],
+    "stop": false
+  },
+  {
+    "scenario": "P1",
+    "concurrency_type": "process",
+    "concurrency": 1,
+    "repetition": 2,
+    "ok": true,
+    "details": [
+      "integrity_check: ok",
+      "foreign_key_check: ok",
+      "triggers: all 6 present",
+      "partial_index: idx_single_active_retraining_job present"
+    ],
+    "stop": false
+  },
+  {
+    "scenario": "P1",
+    "concurrency_type": "process",
+    "concurrency": 1,
+    "repetition": 3,
+    "ok": true,
+    "details": [
+      "integrity_check: ok",
+      "foreign_key_check: ok",
+      "triggers: all 6 present",
+      "partial_index: idx_single_active_retraining_job present"
+    ],
+    "stop": false
+  },
+  {
+    "scenario": "P1",
+    "concurrency_type": "process",
+    "concurrency": 2,
+    "repetition": 1,
+    "ok": true,
+    "details": [
+      "integrity_check: ok",
+      "foreign_key_check: ok",
+      "triggers: all 6 present",
+      "partial_index: idx_single_active_retraining_job present"
+    ],
+    "stop": false
+  },
+  {
+    "scenario": "P1",
+    "concurrency_type": "process",
+    "concurrency": 2,
+    "repetition": 2,
+    "ok": true,
+    "details": [
+      "integrity_check: ok",
+      "foreign_key_check: ok",
+      "triggers: all 6 present",
+      "partial_index: idx_single_active_retraining_job present"
+    ],
+    "stop": false
+  },
+  {
+    "scenario": "P1",
+    "concurrency_type": "process",
+    "concurrency": 2,
+    "repetition": 3,
+    "ok": true,
+    "details": [
+      "integrity_check: ok",
+      "foreign_key_check: ok",
+      "triggers: all 6 present",
+      "partial_index: idx_single_active_retraining_job present"
+    ],
+    "stop": false
+  },
+  {
+    "scenario": "P1",
+    "concurrency_type": "process",
+    "concurrency": 4,
+    "repetition": 1,
+    "ok": true,
+    "details": [
+      "integrity_check: ok",
+      "foreign_key_check: ok",
+      "triggers: all 6 present",
+      "partial_index: idx_single_active_retraining_job present"
+    ],
+    "stop": false
+  },
+  {
+    "scenario": "P1",
+    "concurrency_type": "process",
+    "concurrency": 4,
+    "repetition": 2,
+    "ok": true,
+    "details": [
+      "integrity_check: ok",
+      "foreign_key_check: ok",
+      "triggers: all 6 present",
+      "partial_index: idx_single_active_retraining_job present"
+    ],
+    "stop": false
+  },
+  {
+    "scenario": "P1",
+    "concurrency_type": "process",
+    "concurrency": 4,
+    "repetition": 3,
+    "ok": true,
+    "details": [
+      "integrity_check: ok",
+      "foreign_key_check: ok",
+      "triggers: all 6 present",
+      "partial_index: idx_single_active_retraining_job present"
+    ],
+    "stop": false
+  }
+]
