@@ -18,7 +18,21 @@ This document provides a live tracking record of engineering milestones, phase i
 | **Milestone 8** | Read-Only Promotion Audit API | Completed | `GET /audit/promotions` endpoint, Pydantic schemas, and error isolation. |
 | **Milestone 9** | Controlled Drift Response & Retraining Orchestration | Completed | All Phases 6A–6G.1 and Live Docker Compose Validation Complete. |
 | **Milestone 10** | API Auth, Authorization & Rate Limiting | Completed | Phases 1–4 complete (auth, RBAC, sliding-window rate limiting, security hardening, docs, Compose validation, and 530-test full suite pass). |
-| **Milestone 11** | Persistence & Concurrency Evaluation | Proposed | Planned future engineering work. |
+| **Milestone 11** | Persistence & Concurrency Evaluation | In Progress | Evaluating SQLite concurrency limits; Phase 1 architecture audit approved; Phase 2 benchmark harness & DELETE-mode baseline in progress. |
+
+---
+
+## Milestone 11: Persistence & Concurrency Evaluation (In Progress)
+
+### Phase Progress Breakdown
+
+| Phase | Description | Status | Verification Detail |
+|---|---|---|---|
+| **Phase 1** | SQLite Architecture & Transaction Audit | **Completed** | Full architectural inspection of SQLite transaction semantics (`isolation_level=None`, explicit `immediate_transaction()` vs autocommit paths in audit functions, PRAGMA foreign keys, busy timeout). Audit reviewed and approved. |
+| **Phase 2** | Benchmark Harness & Baseline Establishment | **In Progress** | Dedicated benchmark harness implemented (`benchmarks/m11/harness.py`, `benchmarks/m11/run_benchmark.py`). Established clean-DB test isolation, deterministic seeding, 7 workload scenarios (W1–W6, P1), thread concurrency (1, 5, 10, 25), process concurrency (1, 2, 4), and automatic 4-point integrity verification (`PRAGMA integrity_check`, `foreign_key_check`, trigger audit, partial index verification). Baseline measurement under DELETE journal mode completed (81/81 runs passed integrity verification; results recorded in `benchmarks/m11/results/`). Awaiting Phase 2 review. |
+| **Phase 3** | SQLite Optimization & PRAGMA Evaluation | Planned | Evaluation of WAL journal mode, busy timeout tuning, and synchronous pragmas under identical benchmark harness. |
+| **Phase 4** | Decision Gate & Conditional PostgreSQL Migration | Planned | Empirical decision gate (evaluating against lock contention rate $> 0.1\%$ or P95 latency $> 500\text{ms}$). Migration initiated only if justified. |
+| **Phase 5** | Full Acceptance & Release Verification | Planned | Zero-regression full test suite verification and operational sign-off. |
 
 ---
 
