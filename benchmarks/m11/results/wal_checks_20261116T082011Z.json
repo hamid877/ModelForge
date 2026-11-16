@@ -1,0 +1,106 @@
+{
+  "all_passed": true,
+  "timestamp_utc": "2026-11-16T08:20:15Z",
+  "checks": {
+    "checkpoint_behavior": {
+      "check": "wal_checkpoint_behavior",
+      "passed": true,
+      "wal_size_during_bytes": 309032,
+      "wal_size_after_truncate_bytes": 0,
+      "passive_checkpoint": {
+        "busy": 0,
+        "log_frames": 75,
+        "checkpointed_frames": 0
+      },
+      "truncate_checkpoint": {
+        "busy": 0,
+        "log_frames": 0,
+        "checkpointed_frames": 0
+      },
+      "details": "Passive checkpoint while reader active: frames=75, checkpointed=0. After reader close, TRUNCATE checkpoint returned: busy=0, log_frames=0, checkpointed=0, wal_size=0B."
+    },
+    "shm_lifecycle": {
+      "check": "wal_shm_lifecycle",
+      "passed": true,
+      "initial_files": {
+        "wal_exists": false,
+        "shm_exists": false
+      },
+      "active_connection_files": {
+        "wal_exists": true,
+        "wal_size_bytes": 12392,
+        "shm_exists": true,
+        "shm_size_bytes": 32768
+      },
+      "after_close_files": {
+        "wal_exists": false,
+        "shm_exists": false
+      },
+      "details": "Active WAL size=12392B, SHM size=32768B (32KB index). On final close: wal_exists=False, shm_exists=False."
+    },
+    "final_checkpoint_and_integrity": {
+      "check": "final_checkpoint_and_integrity",
+      "passed": true,
+      "checkpoint": [
+        0,
+        0,
+        0
+      ],
+      "integrity_check": [
+        "ok"
+      ],
+      "foreign_key_violations": [],
+      "missing_triggers": [],
+      "partial_index_present": true,
+      "details": "Integrity: True, FKs: True, Triggers: True, Index: True"
+    },
+    "read_only_metrics": {
+      "check": "read_only_metrics_wal",
+      "passed": true,
+      "duration_s": 2.5,
+      "write_operations": 38,
+      "write_errors": 0,
+      "read_operations": 3161,
+      "read_errors": 0,
+      "read_p50_ms": 0.663,
+      "read_p95_ms": 0.816,
+      "details": "3161 read snapshots executed concurrently during 38 writes. Read errors: 0, Write errors: 0. Read P50: 0.66ms, P95: 0.82ms."
+    },
+    "cross_process_visibility": {
+      "check": "cross_process_journal_mode",
+      "passed": true,
+      "processes_tested": 4,
+      "results": [
+        {
+          "pid": 26,
+          "journal_mode": "wal",
+          "ok": true
+        },
+        {
+          "pid": 27,
+          "journal_mode": "wal",
+          "ok": true
+        },
+        {
+          "pid": 28,
+          "journal_mode": "wal",
+          "ok": true
+        },
+        {
+          "pid": 29,
+          "journal_mode": "wal",
+          "ok": true
+        }
+      ],
+      "details": "All 4/4 processes observed journal_mode='wal': True"
+    },
+    "cleanup_and_residual_state": {
+      "check": "cleanup_and_residual_state",
+      "passed": true,
+      "db_lingers": false,
+      "wal_lingers": false,
+      "shm_lingers": false,
+      "details": "No lingering files: db=True, wal=True, shm=True"
+    }
+  }
+}
