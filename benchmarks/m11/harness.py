@@ -52,10 +52,13 @@ import sys
 import tempfile
 import threading
 import time
+from collections.abc import Generator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 from uuid import uuid4
 
 # ---------------------------------------------------------------------------
@@ -111,6 +114,72 @@ REPETITIONS = 3
 
 
 # ---------------------------------------------------------------------------
+# Configuration structures (Phase 3 Optimization Matrix)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class SQLiteBenchmarkConfig:
+    """Explicit SQLite tuning configuration for controlled experiments."""
+
+    name: str  # "A", "B", "C", "D", "E", "F"
+    label: str  # Human-readable description
+    journal_mode: str  # "DELETE" or "WAL"
+    synchronous: str  # "FULL" or "NORMAL"
+    busy_timeout_ms: int  # 1000, 5000, 10000
+
+    @property
+    def synchronous_int(self) -> int:
+        return 1 if self.synchronous.upper() == "NORMAL" else 2
+
+
+EXPERIMENT_CONFIGS: dict[str, SQLiteBenchmarkConfig] = {
+    "A": SQLiteBenchmarkConfig(
+        name="A",
+        label="Baseline (DELETE, 5000ms)",
+        journal_mode="DELETE",
+        synchronous="FULL",
+        busy_timeout_ms=5000,
+    ),
+    "B": SQLiteBenchmarkConfig(
+        name="B",
+        label="WAL (NORMAL, 5000ms)",
+        journal_mode="WAL",
+        synchronous="NORMAL",
+        busy_timeout_ms=5000,
+    ),
+    "C": SQLiteBenchmarkConfig(
+        name="C",
+        label="WAL + shorter timeout (NORMAL, 1000ms)",
+        journal_mode="WAL",
+        synchronous="NORMAL",
+        busy_timeout_ms=1000,
+    ),
+    "D": SQLiteBenchmarkConfig(
+        name="D",
+        label="WAL + longer timeout (NORMAL, 10000ms)",
+        journal_mode="WAL",
+        synchronous="NORMAL",
+        busy_timeout_ms=10000,
+    ),
+    "E": SQLiteBenchmarkConfig(
+        name="E",
+        label="DELETE + shorter timeout (FULL, 1000ms)",
+        journal_mode="DELETE",
+        synchronous="FULL",
+        busy_timeout_ms=1000,
+    ),
+    "F": SQLiteBenchmarkConfig(
+        name="F",
+        label="DELETE + longer timeout (FULL, 10000ms)",
+        journal_mode="DELETE",
+        synchronous="FULL",
+        busy_timeout_ms=10000,
+    ),
+}
+
+
+# ---------------------------------------------------------------------------
 # Data structures
 # ---------------------------------------------------------------------------
 
@@ -146,6 +215,10 @@ class RunMetrics:
     p99_ms: float
     integrity_ok: bool
     integrity_detail: str
+    verified_connections: int = 0
+    busy_rate_total: float = 0.0
+    busy_rate_excl_fencing: float = 0.0
+    config_name: str = "A"
     latencies_ms: list[float] = field(default_factory=list)
 
     def as_dict(self) -> dict[str, Any]:
@@ -165,9 +238,73 @@ def _create_temp_db() -> Path:
     return Path(path_str)
 
 
-def _initialize_db(db_path: Path) -> None:
-    """Apply the production migration to a fresh database."""
+def _initialize_db(
+    db_path: Path, config: SQLiteBenchmarkConfig | None = None
+) -> None:
+    """Apply the production migration to a fresh database and set initial PRAGMAs."""
     migrate_audit_database_idempotent(db_path)
+    cfg = config or EXPERIMENT_CONFIGS["A"]
+    with db_connection(db_path, isolation_level=None) as conn:
+        conn.execute(f"PRAGMA journal_mode = {cfg.journal_mode};")
+        conn.execute(f"PRAGMA synchronous = {cfg.synchronous};")
+        conn.execute(f"PRAGMA busy_timeout = {cfg.busy_timeout_ms};")
+
+
+@contextmanager
+def apply_benchmark_config(
+    config: SQLiteBenchmarkConfig, target_db_path: Path
+) -> Generator[list[int], None, None]:
+    """Enforce and verify PRAGMAs on EVERY connection opened to target_db_path.
+
+    Yields a 1-element list [verified_connection_count].
+    """
+    import backend.app.ml.db
+
+    orig_get_conn = backend.app.ml.db.get_db_connection
+    verified_count = [0]
+    expected_jm = config.journal_mode.lower()
+    expected_sync = config.synchronous_int
+    expected_bt = config.busy_timeout_ms
+    target_resolved = target_db_path.resolve()
+
+    def wrapped_get_connection(
+        database_path: str | Path | None = None,
+        *,
+        timeout_ms: int | None = None,
+        isolation_level: str | None = None,
+        row_factory: Any = None,
+    ) -> sqlite3.Connection:
+        eff_path = backend.app.ml.db.resolve_shared_database_path(database_path)
+        eff_timeout = (
+            expected_bt if eff_path == target_resolved else timeout_ms
+        )
+        conn = orig_get_conn(
+            database_path=database_path,
+            timeout_ms=eff_timeout,
+            isolation_level=isolation_level,
+            row_factory=row_factory,
+        )
+        if eff_path == target_resolved:
+            conn.execute(f"PRAGMA busy_timeout = {expected_bt};")
+            conn.execute(f"PRAGMA synchronous = {config.synchronous};")
+            jm = conn.execute("PRAGMA journal_mode;").fetchone()[0].lower()
+            sync = conn.execute("PRAGMA synchronous;").fetchone()[0]
+            bt = conn.execute("PRAGMA busy_timeout;").fetchone()[0]
+            if jm != expected_jm or sync != expected_sync or bt != expected_bt:
+                raise RuntimeError(
+                    f"PRAGMA verification failed on connection: "
+                    f"journal_mode={jm} (expected {expected_jm}), "
+                    f"synchronous={sync} (expected {expected_sync}), "
+                    f"busy_timeout={bt} (expected {expected_bt})"
+                )
+            verified_count[0] += 1
+        return conn
+
+    with patch("backend.app.ml.db.get_db_connection", wrapped_get_connection), \
+         patch("backend.app.ml.audit.get_db_connection", wrapped_get_connection), \
+         patch("backend.app.ml.retraining_metrics.get_db_connection", wrapped_get_connection), \
+         patch("backend.app.ml.migrations.get_db_connection", wrapped_get_connection):
+        yield verified_count
 
 
 def _verify_journal_mode(db_path: Path) -> str:
@@ -285,6 +422,8 @@ def _aggregate(
     repetition: int,
     duration_s: float,
     db_path: Path,
+    verified_connections: int = 0,
+    config_name: str = "A",
 ) -> RunMetrics:
     succeeded = sum(1 for r in results if r.success)
     failed = sum(1 for r in results if not r.success)
@@ -296,6 +435,11 @@ def _aggregate(
     total = len(results)
     ops_s = total / duration_s if duration_s > 0 else 0.0
     integrity_ok, integrity_detail = _check_integrity(db_path)
+    busy_rate_total = (busy / total * 100.0) if total > 0 else 0.0
+    non_fencing_total = total - ownership
+    busy_rate_excl_fencing = (
+        (busy / non_fencing_total * 100.0) if non_fencing_total > 0 else 0.0
+    )
     return RunMetrics(
         scenario=scenario,
         concurrency_type=concurrency_type,
@@ -314,6 +458,10 @@ def _aggregate(
         p99_ms=p99,
         integrity_ok=integrity_ok,
         integrity_detail=integrity_detail,
+        verified_connections=verified_connections,
+        busy_rate_total=busy_rate_total,
+        busy_rate_excl_fencing=busy_rate_excl_fencing,
+        config_name=config_name,
         latencies_ms=[lat * 1000.0 for lat in latencies],
     )
 
@@ -346,10 +494,14 @@ def _classify_error(exc: Exception) -> str:
     if is_busy:
         return "SQLITE_BUSY"
 
-    if isinstance(exc, (JobOwnershipError, ActiveJobExistsError)):
-        return "ownership"
-    if isinstance(exc, sqlite3.IntegrityError):
-        return "integrity"
+    curr = exc
+    while curr is not None:
+        if isinstance(curr, (JobOwnershipError, ActiveJobExistsError)):
+            return "ownership"
+        if isinstance(curr, sqlite3.IntegrityError):
+            return "integrity"
+        curr = curr.__cause__ or curr.__context__
+
     return "other"
 
 
@@ -389,6 +541,9 @@ def _w1_worker_thread(
                 except Exception:
                     pass
                 continue
+            else:
+                if warmup_event.is_set():
+                    results.append(OperationResult("W1-claim-empty", True, dt))
         except sqlite3.OperationalError as exc:
             dt = time.perf_counter() - t0
             if warmup_event.is_set():
@@ -778,6 +933,70 @@ def _w5_write_thread(
                 )
 
 
+def _w5_single_worker_thread(
+    db_path: Path,
+    stop_event: threading.Event,
+    results: list[OperationResult],
+    warmup_event: threading.Event,
+    seed: dict[str, Any],
+) -> None:
+    """Single-threaded worker for W5: alternates read and write operations."""
+    from backend.app.ml.audit import get_promotion_audit_records
+
+    cycle = 0
+    while not stop_event.is_set():
+        if cycle % 2 == 0:
+            if cycle % 4 == 0:
+                try:
+                    t0 = time.perf_counter()
+                    get_promotion_audit_records(database_path=db_path, limit=20)
+                    dt = time.perf_counter() - t0
+                    if warmup_event.is_set():
+                        results.append(OperationResult("W5-read-audit", True, dt))
+                except Exception as exc:
+                    dt = time.perf_counter() - t0
+                    if warmup_event.is_set():
+                        results.append(
+                            OperationResult(
+                                "W5-read-audit", False, dt, _classify_error(exc)
+                            )
+                        )
+            else:
+                if seed.get("alert_ids"):
+                    aid = seed["alert_ids"][0]
+                    try:
+                        t0 = time.perf_counter()
+                        get_drift_alert(alert_id=aid, database_path=db_path)
+                        dt = time.perf_counter() - t0
+                        if warmup_event.is_set():
+                            results.append(OperationResult("W5-read-alert", True, dt))
+                    except Exception as exc:
+                        dt = time.perf_counter() - t0
+                        if warmup_event.is_set():
+                            results.append(
+                                OperationResult(
+                                    "W5-read-alert", False, dt, _classify_error(exc)
+                                )
+                            )
+        else:
+            try:
+                t0 = time.perf_counter()
+                record_lifecycle_run(
+                    record={"status": "completed", "reason": "w5-single-write"},
+                    database_path=db_path,
+                )
+                dt = time.perf_counter() - t0
+                if warmup_event.is_set():
+                    results.append(OperationResult("W5-write", True, dt))
+            except Exception as exc:
+                dt = time.perf_counter() - t0
+                if warmup_event.is_set():
+                    results.append(
+                        OperationResult("W5-write", False, dt, _classify_error(exc))
+                    )
+        cycle += 1
+
+
 # ---------------------------------------------------------------------------
 # W6: Promotion audit writes
 # ---------------------------------------------------------------------------
@@ -836,11 +1055,14 @@ def _run_thread_scenario(
     warmup_s: float,
     measure_s: float,
     fn_kwargs: dict[str, Any],
-) -> tuple[list[OperationResult], float]:
+    config: SQLiteBenchmarkConfig | None = None,
+) -> tuple[list[OperationResult], float, int]:
     """Run *n_threads* copies of *worker_fn* with warm-up and measurement phases.
 
-    Returns (results, actual_measurement_duration_s).
+    Returns (results, actual_measurement_duration_s, verified_connections).
     """
+    cfg = config or EXPERIMENT_CONFIGS["A"]
+    db_path = fn_kwargs.get("db_path")
     lock = threading.Lock()
     shared_results: list[OperationResult] = []
 
@@ -859,26 +1081,29 @@ def _run_thread_scenario(
         t = threading.Thread(target=worker_fn, kwargs=kw, daemon=True)
         threads.append(t)
 
-    for t in threads:
-        t.start()
+    with apply_benchmark_config(cfg, db_path) as verified_counter:
+        for t in threads:
+            t.start()
 
-    # Warm-up phase
-    time.sleep(warmup_s)
-    # Clear any results accumulated during warm-up
-    with lock:
-        shared_results.clear()
-    warmup_event.set()
+        # Warm-up phase
+        time.sleep(warmup_s)
+        # Clear any results accumulated during warm-up
+        with lock:
+            shared_results.clear()
+        warmup_event.set()
 
-    # Measurement phase
-    t_start = time.perf_counter()
-    time.sleep(measure_s)
-    stop_event.set()
-    actual_duration = time.perf_counter() - t_start
+        # Measurement phase
+        t_start = time.perf_counter()
+        time.sleep(measure_s)
+        stop_event.set()
+        actual_duration = time.perf_counter() - t_start
 
-    for t in threads:
-        t.join(timeout=10.0)
+        for t in threads:
+            t.join(timeout=10.0)
 
-    return list(shared_results), actual_duration
+        verified = verified_counter[0]
+
+    return list(shared_results), actual_duration, verified
 
 
 # ---------------------------------------------------------------------------
@@ -892,15 +1117,28 @@ def run_w1_threads(
     warmup_s: float,
     measure_s: float,
     repetition: int,
+    config: SQLiteBenchmarkConfig | None = None,
 ) -> RunMetrics:
-    results, duration = _run_thread_scenario(
+    cfg = config or EXPERIMENT_CONFIGS["A"]
+    results, duration, verified = _run_thread_scenario(
         worker_fn=_w1_worker_thread,
         n_threads=n,
         warmup_s=warmup_s,
         measure_s=measure_s,
         fn_kwargs={"db_path": db_path},
+        config=cfg,
     )
-    return _aggregate(results, "W1", "thread", n, repetition, duration, db_path)
+    return _aggregate(
+        results,
+        "W1",
+        "thread",
+        n,
+        repetition,
+        duration,
+        db_path,
+        verified_connections=verified,
+        config_name=cfg.name,
+    )
 
 
 def run_w2_threads(
@@ -909,28 +1147,41 @@ def run_w2_threads(
     warmup_s: float,
     measure_s: float,
     repetition: int,
+    config: SQLiteBenchmarkConfig | None = None,
 ) -> RunMetrics:
     """W2: Heartbeat write contention. Requires a pre-existing running job."""
-    # Create and claim exactly one job before starting threads
+    cfg = config or EXPERIMENT_CONFIGS["A"]
     jid = f"job-w2-{uuid4()}"
-    create_queued_job(
-        database_path=db_path,
-        dataset_id="bench-ds-w2",
-        trigger_source="benchmark-w2",
-        job_id=jid,
-    )
-    shared_job = claim_queued_job(database_path=db_path, worker_id="w2-owner")
+    with apply_benchmark_config(cfg, db_path):
+        create_queued_job(
+            database_path=db_path,
+            dataset_id="bench-ds-w2",
+            trigger_source="benchmark-w2",
+            job_id=jid,
+        )
+        shared_job = claim_queued_job(database_path=db_path, worker_id="w2-owner")
     if shared_job is None:
         raise RuntimeError("W2: Could not claim initial job")
 
-    results, duration = _run_thread_scenario(
+    results, duration, verified = _run_thread_scenario(
         worker_fn=_w2_worker_thread,
         n_threads=n,
         warmup_s=warmup_s,
         measure_s=measure_s,
         fn_kwargs={"db_path": db_path, "shared_job": shared_job},
+        config=cfg,
     )
-    return _aggregate(results, "W2", "thread", n, repetition, duration, db_path)
+    return _aggregate(
+        results,
+        "W2",
+        "thread",
+        n,
+        repetition,
+        duration,
+        db_path,
+        verified_connections=verified,
+        config_name=cfg.name,
+    )
 
 
 def run_w3_threads(
@@ -939,15 +1190,28 @@ def run_w3_threads(
     warmup_s: float,
     measure_s: float,
     repetition: int,
+    config: SQLiteBenchmarkConfig | None = None,
 ) -> RunMetrics:
-    results, duration = _run_thread_scenario(
+    cfg = config or EXPERIMENT_CONFIGS["A"]
+    results, duration, verified = _run_thread_scenario(
         worker_fn=_w3_worker_thread,
         n_threads=n,
         warmup_s=warmup_s,
         measure_s=measure_s,
         fn_kwargs={"db_path": db_path},
+        config=cfg,
     )
-    return _aggregate(results, "W3", "thread", n, repetition, duration, db_path)
+    return _aggregate(
+        results,
+        "W3",
+        "thread",
+        n,
+        repetition,
+        duration,
+        db_path,
+        verified_connections=verified,
+        config_name=cfg.name,
+    )
 
 
 def run_w4_threads(
@@ -956,15 +1220,28 @@ def run_w4_threads(
     warmup_s: float,
     measure_s: float,
     repetition: int,
+    config: SQLiteBenchmarkConfig | None = None,
 ) -> RunMetrics:
-    results, duration = _run_thread_scenario(
+    cfg = config or EXPERIMENT_CONFIGS["A"]
+    results, duration, verified = _run_thread_scenario(
         worker_fn=_w4_worker_thread,
         n_threads=n,
         warmup_s=warmup_s,
         measure_s=measure_s,
         fn_kwargs={"db_path": db_path},
+        config=cfg,
     )
-    return _aggregate(results, "W4", "thread", n, repetition, duration, db_path)
+    return _aggregate(
+        results,
+        "W4",
+        "thread",
+        n,
+        repetition,
+        duration,
+        db_path,
+        verified_connections=verified,
+        config_name=cfg.name,
+    )
 
 
 def run_w5_threads(
@@ -974,60 +1251,88 @@ def run_w5_threads(
     measure_s: float,
     repetition: int,
     seed: dict[str, Any],
+    config: SQLiteBenchmarkConfig | None = None,
 ) -> RunMetrics:
-    """W5: Mixed read-heavy + write workload. n//2+1 readers, rest writers."""
-    n_readers = max(1, (n + 1) // 2)
-    n_writers = max(1, n - n_readers)
-
+    """W5: Mixed read-heavy + write workload. Exactly n threads are active."""
+    cfg = config or EXPERIMENT_CONFIGS["A"]
     results: list[OperationResult] = []
     stop_event = threading.Event()
     warmup_event = threading.Event()
 
     threads = []
-    for idx in range(n_readers):
+    if n == 1:
         t = threading.Thread(
-            target=_w5_read_thread,
+            target=_w5_single_worker_thread,
             kwargs={
                 "db_path": db_path,
                 "stop_event": stop_event,
                 "results": results,
                 "warmup_event": warmup_event,
                 "seed": seed,
-                "worker_idx": idx,
             },
             daemon=True,
         )
         threads.append(t)
-    for idx in range(n_writers):
-        t = threading.Thread(
-            target=_w5_write_thread,
-            kwargs={
-                "db_path": db_path,
-                "stop_event": stop_event,
-                "results": results,
-                "warmup_event": warmup_event,
-                "worker_idx": idx,
-            },
-            daemon=True,
-        )
-        threads.append(t)
+    else:
+        n_writers = max(1, n // 2)
+        n_readers = n - n_writers
+        for idx in range(n_readers):
+            t = threading.Thread(
+                target=_w5_read_thread,
+                kwargs={
+                    "db_path": db_path,
+                    "stop_event": stop_event,
+                    "results": results,
+                    "warmup_event": warmup_event,
+                    "seed": seed,
+                    "worker_idx": idx,
+                },
+                daemon=True,
+            )
+            threads.append(t)
+        for idx in range(n_writers):
+            t = threading.Thread(
+                target=_w5_write_thread,
+                kwargs={
+                    "db_path": db_path,
+                    "stop_event": stop_event,
+                    "results": results,
+                    "warmup_event": warmup_event,
+                    "worker_idx": idx,
+                },
+                daemon=True,
+            )
+            threads.append(t)
 
-    for t in threads:
-        t.start()
+    with apply_benchmark_config(cfg, db_path) as verified_counter:
+        for t in threads:
+            t.start()
 
-    time.sleep(warmup_s)
-    results.clear()
-    warmup_event.set()
+        time.sleep(warmup_s)
+        results.clear()
+        warmup_event.set()
 
-    t_start = time.perf_counter()
-    time.sleep(measure_s)
-    stop_event.set()
-    actual_duration = time.perf_counter() - t_start
+        t_start = time.perf_counter()
+        time.sleep(measure_s)
+        stop_event.set()
+        actual_duration = time.perf_counter() - t_start
 
-    for t in threads:
-        t.join(timeout=10.0)
+        for t in threads:
+            t.join(timeout=10.0)
 
-    return _aggregate(results, "W5", "thread", n, repetition, actual_duration, db_path)
+        verified = verified_counter[0]
+
+    return _aggregate(
+        results,
+        "W5",
+        "thread",
+        n,
+        repetition,
+        actual_duration,
+        db_path,
+        verified_connections=verified,
+        config_name=cfg.name,
+    )
 
 
 def run_w6_threads(
@@ -1036,15 +1341,28 @@ def run_w6_threads(
     warmup_s: float,
     measure_s: float,
     repetition: int,
+    config: SQLiteBenchmarkConfig | None = None,
 ) -> RunMetrics:
-    results, duration = _run_thread_scenario(
+    cfg = config or EXPERIMENT_CONFIGS["A"]
+    results, duration, verified = _run_thread_scenario(
         worker_fn=_w6_worker_thread,
         n_threads=n,
         warmup_s=warmup_s,
         measure_s=measure_s,
         fn_kwargs={"db_path": db_path},
+        config=cfg,
     )
-    return _aggregate(results, "W6", "thread", n, repetition, duration, db_path)
+    return _aggregate(
+        results,
+        "W6",
+        "thread",
+        n,
+        repetition,
+        duration,
+        db_path,
+        verified_connections=verified,
+        config_name=cfg.name,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1058,21 +1376,21 @@ def _p1_process_worker(
     stop_event: multiprocessing.Event,
     warmup_event: multiprocessing.Event,
     worker_idx: int,
+    config_dict: dict[str, Any] | None = None,
 ) -> None:
     """Process worker for P1: API/worker-style cross-process contention.
 
     Each process independently attempts to create + claim + heartbeat + complete
     retraining jobs, simulating real API/worker cross-process behaviour.
     """
-    # Need to put repo root on path in subprocess
     repo_root = str(Path(__file__).resolve().parent.parent.parent)
     if repo_root not in sys.path:
         sys.path.insert(0, repo_root)
 
     from backend.app.ml.jobs import (
-        ActiveJobExistsError,
         claim_queued_job,
         create_queued_job,
+        heartbeat_job,
         transition_job_status,
     )
 
@@ -1080,91 +1398,103 @@ def _p1_process_worker(
     worker_id = f"p1-proc-{worker_idx}-{os.getpid()}"
     local_results: list[dict] = []
 
-    while not stop_event.is_set():
-        job_id = f"job-p1-{uuid4()}"
-        # Phase 1: create
-        try:
-            t0 = time.perf_counter()
-            create_queued_job(
-                database_path=db_path,
-                dataset_id="bench-ds-p1",
-                trigger_source="benchmark-p1",
-                job_id=job_id,
-            )
-            dt = time.perf_counter() - t0
-            created = True
-            create_err = None
-        except ActiveJobExistsError:
-            dt = time.perf_counter() - t0
-            created = False
-            create_err = "ownership"
-        except sqlite3.OperationalError as exc:
-            dt = time.perf_counter() - t0
-            created = False
-            create_err = "SQLITE_BUSY" if "locked" in str(exc).lower() else "other"
-        except Exception:
-            dt = time.perf_counter() - t0
-            created = False
-            create_err = "other"
+    cfg = (
+        SQLiteBenchmarkConfig(
+            name=config_dict["name"],
+            label=config_dict.get("label", ""),
+            journal_mode=config_dict["journal_mode"],
+            synchronous=config_dict["synchronous"],
+            busy_timeout_ms=config_dict["busy_timeout_ms"],
+        )
+        if config_dict
+        else EXPERIMENT_CONFIGS["A"]
+    )
 
-        if warmup_event.is_set():
-            local_results.append(
-                {
-                    "scenario": "P1-create",
-                    "success": created,
-                    "latency_s": dt,
-                    "error_type": create_err,
-                }
-            )
-
-        if not created:
-            # Try claiming whatever is queued
+    with apply_benchmark_config(cfg, db_path) as verified_counter:
+        while not stop_event.is_set():
+            job_id = f"job-p1-{uuid4()}"
+            # Phase 1: create
             try:
                 t0 = time.perf_counter()
-                claimed = claim_queued_job(database_path=db_path, worker_id=worker_id)
+                create_queued_job(
+                    database_path=db_path,
+                    dataset_id="bench-ds-p1",
+                    trigger_source="benchmark-p1",
+                    job_id=job_id,
+                )
                 dt = time.perf_counter() - t0
-                if warmup_event.is_set():
-                    local_results.append(
-                        {
-                            "scenario": "P1-claim",
-                            "success": claimed is not None,
-                            "latency_s": dt,
-                            "error_type": None,
-                        }
-                    )
-                if claimed is not None:
-                    # Short heartbeat then complete
-                    try:
-                        heartbeat_job(
-                            database_path=db_path,
-                            job_id=claimed["job_id"],
-                            worker_id=claimed["worker_id"],
-                            lease_token=claimed["lease_token"],
-                            lease_duration_seconds=60,
-                        )
-                        transition_job_status(
-                            database_path=db_path,
-                            job_id=claimed["job_id"],
-                            worker_id=claimed["worker_id"],
-                            lease_token=claimed["lease_token"],
-                            target_status="failed",
-                            failure_reason="benchmark-p1-cleanup",
-                        )
-                    except Exception:
-                        pass
-            except Exception:
+                created = True
+                create_err = None
+            except Exception as exc:
                 dt = time.perf_counter() - t0
-                if warmup_event.is_set():
-                    local_results.append(
-                        {
-                            "scenario": "P1-claim",
-                            "success": False,
-                            "latency_s": dt,
-                            "error_type": "other",
-                        }
-                    )
+                created = False
+                create_err = _classify_error(exc)
 
-    result_queue.put(local_results)
+            if warmup_event.is_set():
+                local_results.append(
+                    {
+                        "scenario": "P1-create",
+                        "success": created,
+                        "latency_s": dt,
+                        "error_type": create_err,
+                    }
+                )
+
+            if not created:
+                # Try claiming whatever is queued
+                try:
+                    t0 = time.perf_counter()
+                    claimed = claim_queued_job(database_path=db_path, worker_id=worker_id)
+                    dt = time.perf_counter() - t0
+                    if warmup_event.is_set():
+                        sc_name = (
+                            "P1-claim" if claimed is not None else "P1-claim-empty"
+                        )
+                        local_results.append(
+                            {
+                                "scenario": sc_name,
+                                "success": True,
+                                "latency_s": dt,
+                                "error_type": None,
+                            }
+                        )
+                    if claimed is not None:
+                        # Short heartbeat then complete
+                        try:
+                            heartbeat_job(
+                                database_path=db_path,
+                                job_id=claimed["job_id"],
+                                worker_id=claimed["worker_id"],
+                                lease_token=claimed["lease_token"],
+                                lease_duration_seconds=60,
+                            )
+                            transition_job_status(
+                                database_path=db_path,
+                                job_id=claimed["job_id"],
+                                worker_id=claimed["worker_id"],
+                                lease_token=claimed["lease_token"],
+                                target_status="failed",
+                                failure_reason="benchmark-p1-cleanup",
+                            )
+                        except Exception:
+                            pass
+                except Exception as exc:
+                    dt = time.perf_counter() - t0
+                    if warmup_event.is_set():
+                        local_results.append(
+                            {
+                                "scenario": "P1-claim",
+                                "success": False,
+                                "latency_s": dt,
+                                "error_type": _classify_error(exc),
+                            }
+                        )
+
+        verified = verified_counter[0]
+
+    result_queue.put(
+        {"results": local_results, "verified_connections": verified}
+    )
 
 
 def run_p1_processes(
@@ -1173,8 +1503,17 @@ def run_p1_processes(
     warmup_s: float,
     measure_s: float,
     repetition: int,
+    config: SQLiteBenchmarkConfig | None = None,
 ) -> RunMetrics:
     """P1: Cross-process contention using multiprocessing."""
+    cfg = config or EXPERIMENT_CONFIGS["A"]
+    config_dict = {
+        "name": cfg.name,
+        "label": cfg.label,
+        "journal_mode": cfg.journal_mode,
+        "synchronous": cfg.synchronous,
+        "busy_timeout_ms": cfg.busy_timeout_ms,
+    }
     result_queue: multiprocessing.Queue = multiprocessing.Queue()
     stop_event = multiprocessing.Event()
     warmup_event = multiprocessing.Event()
@@ -1183,7 +1522,14 @@ def run_p1_processes(
     for idx in range(n):
         p = multiprocessing.Process(
             target=_p1_process_worker,
-            args=(str(db_path), result_queue, stop_event, warmup_event, idx),
+            args=(
+                str(db_path),
+                result_queue,
+                stop_event,
+                warmup_event,
+                idx,
+                config_dict,
+            ),
             daemon=True,
         )
         procs.append(p)
@@ -1206,10 +1552,15 @@ def run_p1_processes(
 
     # Collect results from queue
     all_raw: list[dict] = []
+    total_verified = 0
     while True:
         try:
             batch = result_queue.get_nowait()
-            all_raw.extend(batch)
+            if isinstance(batch, dict) and "results" in batch:
+                all_raw.extend(batch["results"])
+                total_verified += batch.get("verified_connections", 0)
+            elif isinstance(batch, list):
+                all_raw.extend(batch)
         except Exception:
             break
 
@@ -1222,7 +1573,17 @@ def run_p1_processes(
         )
         for r in all_raw
     ]
-    return _aggregate(results, "P1", "process", n, repetition, actual_duration, db_path)
+    return _aggregate(
+        results,
+        "P1",
+        "process",
+        n,
+        repetition,
+        actual_duration,
+        db_path,
+        verified_connections=total_verified,
+        config_name=cfg.name,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1230,23 +1591,29 @@ def run_p1_processes(
 # ---------------------------------------------------------------------------
 
 
-def capture_environment() -> dict[str, Any]:
+def capture_environment(
+    config: SQLiteBenchmarkConfig | None = None,
+) -> dict[str, Any]:
     """Capture reproducibility metadata for the benchmark run."""
+    cfg = config or EXPERIMENT_CONFIGS["A"]
     env: dict[str, Any] = {
         "timestamp_utc": datetime.now(UTC).isoformat(),
         "python_version": sys.version,
         "sqlite_version": sqlite3.sqlite_version,
         "platform": platform.platform(),
         "cpu_count": os.cpu_count(),
-        "journal_mode": JOURNAL_MODE,
-        "busy_timeout_ms": BUSY_TIMEOUT_MS,
+        "config_name": cfg.name,
+        "config_label": cfg.label,
+        "journal_mode": cfg.journal_mode,
+        "synchronous": cfg.synchronous,
+        "busy_timeout_ms": cfg.busy_timeout_ms,
         "warmup_seconds": WARMUP_SECONDS,
         "thread_concurrency_levels": list(THREAD_CONCURRENCY_LEVELS),
         "process_concurrency_levels": list(PROCESS_CONCURRENCY_LEVELS),
         "repetitions": REPETITIONS,
         "note": (
-            "Baseline measurement: DELETE journal mode, 5000 ms busy_timeout. "
-            "WAL not enabled. All databases are isolated temporaries."
+            f"Benchmark configuration {cfg.name}: {cfg.label}. "
+            "All databases are isolated temporaries."
         ),
     }
     return env
@@ -1257,13 +1624,26 @@ def capture_environment() -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-def _check_correctness(db_path: Path) -> dict[str, Any]:
+def _check_correctness(
+    db_path: Path, config: SQLiteBenchmarkConfig | None = None
+) -> dict[str, Any]:
     """Post-run correctness verification.
 
     Returns a dict with 'ok' (bool) and 'details'.
     Stops if any structural invariant fails.
     """
     details: list[str] = []
+    cfg = config or EXPERIMENT_CONFIGS["A"]
+
+    # In WAL mode, verify final checkpoint truncate
+    if cfg.journal_mode == "WAL":
+        try:
+            with db_connection(db_path, isolation_level=None) as conn:
+                chk_res = conn.execute("PRAGMA wal_checkpoint(TRUNCATE);").fetchone()
+                details.append(f"wal_checkpoint(TRUNCATE): {chk_res}")
+        except Exception as exc:
+            details.append(f"wal_checkpoint exception: {exc}")
+            return {"ok": False, "details": details, "stop": True}
 
     # 1. SQLite integrity_check
     int_ok, int_detail = _check_integrity(db_path)

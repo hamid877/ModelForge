@@ -40,6 +40,7 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from benchmarks.m11.harness import (  # noqa: E402
+    EXPERIMENT_CONFIGS,
     MEASUREMENT_SECONDS_FULL,
     MEASUREMENT_SECONDS_QUICK,
     PROCESS_CONCURRENCY_LEVELS,
@@ -47,6 +48,7 @@ from benchmarks.m11.harness import (  # noqa: E402
     THREAD_CONCURRENCY_LEVELS,
     WARMUP_SECONDS,
     RunMetrics,
+    SQLiteBenchmarkConfig,
     _check_correctness,
     _create_temp_db,
     _initialize_db,
@@ -102,21 +104,26 @@ def _run_single(
     repetition: int,
     warmup_s: float,
     measure_s: float,
+    config: SQLiteBenchmarkConfig | None = None,
 ) -> tuple[RunMetrics, dict]:
     """Run one scenario × concurrency × repetition. Returns (metrics, correctness)."""
+    cfg = config or EXPERIMENT_CONFIGS["A"]
     db_path = _create_temp_db()
     try:
-        _initialize_db(db_path)
+        _initialize_db(db_path, config=cfg)
         journal = _verify_journal_mode(db_path)
-        if journal != "delete":
+        if journal.lower() != cfg.journal_mode.lower():
             logger.warning(
-                "Journal mode is '%s', expected 'delete'. Proceeding anyway.", journal
+                "Journal mode is '%s', expected '%s'. Proceeding anyway.",
+                journal,
+                cfg.journal_mode.lower(),
             )
         seed = _seed_baseline_data(db_path)
 
         logger.info(
-            "  Running %s concurrency=%d (type=%s) rep=%d ...",
+            "  Running %s config=%s concurrency=%d (type=%s) rep=%d ...",
             scenario,
+            cfg.name,
             concurrency,
             concurrency_type,
             repetition,
@@ -131,26 +138,18 @@ def _run_single(
                     measure_s=measure_s,
                     repetition=repetition,
                     seed=seed,
+                    config=cfg,
                 )
             else:
                 fn = THREAD_SCENARIOS[scenario]
-                # W2 needs special handling (seed job required)
-                if scenario == "W2":
-                    metrics = fn(
-                        n=concurrency,
-                        db_path=db_path,
-                        warmup_s=warmup_s,
-                        measure_s=measure_s,
-                        repetition=repetition,
-                    )
-                else:
-                    metrics = fn(
-                        n=concurrency,
-                        db_path=db_path,
-                        warmup_s=warmup_s,
-                        measure_s=measure_s,
-                        repetition=repetition,
-                    )
+                metrics = fn(
+                    n=concurrency,
+                    db_path=db_path,
+                    warmup_s=warmup_s,
+                    measure_s=measure_s,
+                    repetition=repetition,
+                    config=cfg,
+                )
         elif scenario in PROCESS_SCENARIOS:
             fn = PROCESS_SCENARIOS[scenario]
             metrics = fn(
@@ -159,11 +158,12 @@ def _run_single(
                 warmup_s=warmup_s,
                 measure_s=measure_s,
                 repetition=repetition,
+                config=cfg,
             )
         else:
             raise ValueError(f"Unknown scenario: {scenario}")
 
-        correctness = _check_correctness(db_path)
+        correctness = _check_correctness(db_path, config=cfg)
 
         if not correctness["ok"]:
             logger.error(
@@ -179,6 +179,8 @@ def _run_single(
     finally:
         try:
             db_path.unlink(missing_ok=True)
+            Path(str(db_path) + "-wal").unlink(missing_ok=True)
+            Path(str(db_path) + "-shm").unlink(missing_ok=True)
         except Exception:
             pass
 
@@ -195,16 +197,24 @@ def run_benchmark_matrix(
     repetitions: int,
     warmup_s: float,
     measure_s: float,
+    config: SQLiteBenchmarkConfig | None = None,
 ) -> tuple[list[RunMetrics], list[dict]]:
     all_metrics: list[RunMetrics] = []
     all_correctness: list[dict] = []
+    cfg = config or EXPERIMENT_CONFIGS["A"]
 
     for scenario in scenarios:
         is_process = scenario in PROCESS_SCENARIOS
         levels = process_levels if is_process else thread_levels
         conc_type = "process" if is_process else "thread"
 
-        logger.info("=== Scenario: %s (%s) ===", scenario, conc_type)
+        logger.info(
+            "=== Scenario: %s (%s) [Config %s: %s] ===",
+            scenario,
+            conc_type,
+            cfg.name,
+            cfg.label,
+        )
 
         for concurrency in levels:
             for rep in range(1, repetitions + 1):
@@ -215,6 +225,7 @@ def run_benchmark_matrix(
                     repetition=rep,
                     warmup_s=warmup_s,
                     measure_s=measure_s,
+                    config=cfg,
                 )
                 all_metrics.append(metrics)
                 all_correctness.append(
@@ -223,6 +234,7 @@ def run_benchmark_matrix(
                         "concurrency_type": conc_type,
                         "concurrency": concurrency,
                         "repetition": rep,
+                        "config_name": cfg.name,
                         **correctness,
                     }
                 )
@@ -231,8 +243,9 @@ def run_benchmark_matrix(
                 if not correctness["ok"] and correctness.get("stop"):
                     logger.error(
                         "Stopping benchmark: Correctness failure detected in "
-                        "%s concurrency=%d rep=%d. Details: %s",
+                        "%s config=%s concurrency=%d rep=%d. Details: %s",
                         scenario,
+                        cfg.name,
                         concurrency,
                         rep,
                         correctness["details"],
@@ -247,10 +260,12 @@ def run_benchmark_matrix(
 def _log_progress(m: RunMetrics) -> None:
     busy_rate = (m.busy_errors / m.total_ops * 100) if m.total_ops else 0.0
     logger.info(
-        "    %s %s×%d rep%d: %d ops in %.1fs = %.1f ops/s | "
+        "    %s [%s] %s×%d rep%d: %d ops in %.1fs = %.1f ops/s | "
         "P50=%.1fms P95=%.1fms P99=%.1fms | "
-        "busy=%d (%.3f%%) ownership=%d other=%d | integrity=%s",
+        "busy=%d (%.3f%%, excl_fence=%.3f%%) ownership=%d other=%d | "
+        "verified_conn=%d | integrity=%s",
         m.scenario,
+        m.config_name,
         m.concurrency_type,
         m.concurrency,
         m.repetition,
@@ -262,8 +277,10 @@ def _log_progress(m: RunMetrics) -> None:
         m.p99_ms,
         m.busy_errors,
         busy_rate,
+        m.busy_rate_excl_fencing,
         m.ownership_rejections,
         m.other_failures,
+        m.verified_connections,
         "OK" if m.integrity_ok else "FAIL",
     )
 
@@ -505,6 +522,12 @@ def main() -> int:
         description="M11 Phase 2 — SQLite benchmark harness for ModelForge"
     )
     parser.add_argument(
+        "--config",
+        choices=["A", "B", "C", "D", "E", "F"],
+        default="A",
+        help="SQLite benchmark configuration: A (DELETE 5s baseline), B (WAL 5s), C (WAL 1s), D (WAL 10s), E (DELETE 1s), F (DELETE 10s). (default: A)",
+    )
+    parser.add_argument(
         "--profile",
         choices=["quick", "full"],
         default="quick",
@@ -569,12 +592,13 @@ def main() -> int:
 
     ts_tag = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
 
-    env = capture_environment()
+    cfg = EXPERIMENT_CONFIGS[args.config]
+    env = capture_environment(config=cfg)
     env["profile"] = args.profile
     env["measurement_seconds"] = measure_s
     env["scenarios_run"] = scenarios
 
-    logger.info("=== M11 Phase 2 SQLite Benchmark ===")
+    logger.info("=== M11 SQLite Benchmark [%s: %s] ===", cfg.name, cfg.label)
     logger.info(
         "Profile: %s | Measurement: %.0fs | Warm-up: %.0fs",
         args.profile,
@@ -599,6 +623,7 @@ def main() -> int:
         repetitions=args.repetitions,
         warmup_s=warmup_s,
         measure_s=measure_s,
+        config=cfg,
     )
     total_elapsed = time.perf_counter() - t_overall
 
