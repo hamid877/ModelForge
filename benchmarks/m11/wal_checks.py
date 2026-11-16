@@ -19,6 +19,7 @@ import sys
 import tempfile
 import threading
 import time
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -38,14 +39,13 @@ logger = logging.getLogger("m11.wal_checks")
 
 
 def check_wal_checkpoint_behavior(db_path: Path) -> dict[str, Any]:
-    """Test WAL checkpointing: PASSIVE while reader active vs TRUNCATE after reader commits."""
+    """Test WAL checkpointing: PASSIVE during reader vs TRUNCATE after."""
     # 1. Establish WAL mode
     with db_connection(db_path, isolation_level=None) as conn:
         conn.execute("PRAGMA journal_mode = WAL;")
         conn.execute("PRAGMA synchronous = NORMAL;")
 
     wal_path = Path(str(db_path) + "-wal")
-    shm_path = Path(str(db_path) + "-shm")
 
     # 2. Open reader holding a read transaction
     reader_conn = sqlite3.connect(str(db_path))
@@ -80,6 +80,13 @@ def check_wal_checkpoint_behavior(db_path: Path) -> dict[str, Any]:
         and wal_size_after == 0  # truncated
     )
 
+    detail_str = (
+        f"Passive checkpoint while reader active: frames={passive_res[1]}, "
+        f"checkpointed={passive_res[2]}. After reader close, TRUNCATE "
+        f"returned: busy={truncate_res[0]}, log_frames={truncate_res[1]}, "
+        f"checkpointed={truncate_res[2]}, wal_size={wal_size_after}B."
+    )
+
     return {
         "check": "wal_checkpoint_behavior",
         "passed": success,
@@ -95,16 +102,12 @@ def check_wal_checkpoint_behavior(db_path: Path) -> dict[str, Any]:
             "log_frames": truncate_res[1] if truncate_res else None,
             "checkpointed_frames": truncate_res[2] if truncate_res else None,
         },
-        "details": (
-            f"Passive checkpoint while reader active: frames={passive_res[1]}, checkpointed={passive_res[2]}. "
-            f"After reader close, TRUNCATE checkpoint returned: busy={truncate_res[0]}, "
-            f"log_frames={truncate_res[1]}, checkpointed={truncate_res[2]}, wal_size={wal_size_after}B."
-        ),
+        "details": detail_str,
     }
 
 
 def check_wal_shm_lifecycle(db_path: Path) -> dict[str, Any]:
-    """Test WAL and SHM file lifecycle during connection open, write, and complete close."""
+    """Test WAL and SHM file lifecycle during open, write, and close."""
     wal_path = Path(str(db_path) + "-wal")
     shm_path = Path(str(db_path) + "-shm")
 
@@ -117,8 +120,10 @@ def check_wal_shm_lifecycle(db_path: Path) -> dict[str, Any]:
     conn.execute("PRAGMA journal_mode = WAL;")
     conn.execute("PRAGMA synchronous = NORMAL;")
     conn.execute(
-        "INSERT INTO worker_heartbeats (worker_id, heartbeat_at, started_at, status) "
-        "VALUES ('lifecycle-w1', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', 'active');"
+        "INSERT INTO worker_heartbeats "
+        "(worker_id, heartbeat_at, started_at, status) "
+        "VALUES ('lifecycle-w1', '2026-01-01T00:00:00Z', "
+        "'2026-01-01T00:00:00Z', 'active');"
     )
     conn.commit()
 
@@ -134,6 +139,11 @@ def check_wal_shm_lifecycle(db_path: Path) -> dict[str, Any]:
     closed_shm = shm_path.exists()
 
     passed = open_wal and open_shm and open_shm_size == 32768
+    detail_str = (
+        f"Active WAL size={open_wal_size}B, SHM size={open_shm_size}B "
+        f"(32KB index). On final close: wal_exists={closed_wal}, "
+        f"shm_exists={closed_shm}."
+    )
     return {
         "check": "wal_shm_lifecycle",
         "passed": passed,
@@ -144,17 +154,16 @@ def check_wal_shm_lifecycle(db_path: Path) -> dict[str, Any]:
             "shm_exists": open_shm,
             "shm_size_bytes": open_shm_size,
         },
-        "after_close_files": {"wal_exists": closed_wal, "shm_exists": closed_shm},
-        "details": (
-            f"Active WAL size={open_wal_size}B, SHM size={open_shm_size}B (32KB index). "
-            f"On final close: wal_exists={closed_wal}, shm_exists={closed_shm}."
-        ),
+        "after_close_files": {
+            "wal_exists": closed_wal,
+            "shm_exists": closed_shm,
+        },
+        "details": detail_str,
     }
 
 
 def check_final_checkpoint_and_integrity(db_path: Path) -> dict[str, Any]:
     """Perform final checkpoint and verify 4-point integrity."""
-    wal_path = Path(str(db_path) + "-wal")
     with db_connection(db_path, isolation_level=None) as conn:
         chk_res = conn.execute("PRAGMA wal_checkpoint(TRUNCATE);").fetchone()
         int_rows = conn.execute("PRAGMA integrity_check(10);").fetchall()
@@ -186,7 +195,18 @@ def check_final_checkpoint_and_integrity(db_path: Path) -> dict[str, Any]:
     int_ok = [r[0] for r in int_rows] == ["ok"]
     fk_ok = len(fk_rows) == 0
     trig_ok = len(missing_triggers) == 0
-    passed = int_ok and fk_ok and trig_ok and has_partial_idx and (chk_res[0] == 0 if chk_res else False)
+    passed = (
+        int_ok
+        and fk_ok
+        and trig_ok
+        and has_partial_idx
+        and (chk_res[0] == 0 if chk_res else False)
+    )
+
+    detail_str = (
+        f"Integrity: {int_ok}, FKs: {fk_ok}, Triggers: {trig_ok}, "
+        f"Index: {has_partial_idx}"
+    )
 
     return {
         "check": "final_checkpoint_and_integrity",
@@ -196,12 +216,14 @@ def check_final_checkpoint_and_integrity(db_path: Path) -> dict[str, Any]:
         "foreign_key_violations": fk_rows,
         "missing_triggers": list(missing_triggers),
         "partial_index_present": has_partial_idx,
-        "details": f"Integrity: {int_ok}, FKs: {fk_ok}, Triggers: {trig_ok}, Index: {has_partial_idx}",
+        "details": detail_str,
     }
 
 
-def check_read_only_metrics_wal(db_path: Path, duration_s: float = 3.0) -> dict[str, Any]:
-    """Verify that read-only metrics connections (file:path?mode=ro) function concurrently with writes."""
+def check_read_only_metrics_wal(
+    db_path: Path, duration_s: float = 3.0
+) -> dict[str, Any]:
+    """Verify that read-only metrics connections work during concurrent writes."""
     with db_connection(db_path, isolation_level=None) as conn:
         conn.execute("PRAGMA journal_mode = WAL;")
         conn.execute("PRAGMA synchronous = NORMAL;")
@@ -252,9 +274,20 @@ def check_read_only_metrics_wal(db_path: Path, duration_s: float = 3.0) -> dict[
     r_thread.join(timeout=5.0)
 
     p50 = sorted(read_latencies)[len(read_latencies) // 2] if read_latencies else 0.0
-    p95 = sorted(read_latencies)[int(len(read_latencies) * 0.95)] if read_latencies else 0.0
+    p95 = (
+        sorted(read_latencies)[int(len(read_latencies) * 0.95)]
+        if read_latencies
+        else 0.0
+    )
 
     passed = read_errors[0] == 0 and read_count[0] > 0 and write_count[0] > 0
+
+    detail_str = (
+        f"{read_count[0]} read snapshots executed concurrently during "
+        f"{write_count[0]} writes. Read errors: {read_errors[0]}, "
+        f"Write errors: {write_errors[0]}. Read P50: {p50:.2f}ms, "
+        f"P95: {p95:.2f}ms."
+    )
 
     return {
         "check": "read_only_metrics_wal",
@@ -266,11 +299,7 @@ def check_read_only_metrics_wal(db_path: Path, duration_s: float = 3.0) -> dict[
         "read_errors": read_errors[0],
         "read_p50_ms": round(p50, 3),
         "read_p95_ms": round(p95, 3),
-        "details": (
-            f"{read_count[0]} read snapshots executed concurrently during {write_count[0]} writes. "
-            f"Read errors: {read_errors[0]}, Write errors: {write_errors[0]}. "
-            f"Read P50: {p50:.2f}ms, P95: {p95:.2f}ms."
-        ),
+        "details": detail_str,
     }
 
 
@@ -284,13 +313,15 @@ def _proc_journal_worker(path_str: str, q: multiprocessing.Queue):
         q.put({"pid": os.getpid(), "journal_mode": str(exc), "ok": False})
 
 
-def check_cross_process_journal_mode(db_path: Path, n_processes: int = 4) -> dict[str, Any]:
-    """Verify that multiple independent OS processes observe identical journal mode."""
+def check_cross_process_journal_mode(
+    db_path: Path, n_processes: int = 4
+) -> dict[str, Any]:
+    """Verify that multiple processes observe identical journal mode."""
     with db_connection(db_path, isolation_level=None) as conn:
         conn.execute("PRAGMA journal_mode = WAL;")
         conn.execute("PRAGMA synchronous = NORMAL;")
 
-    q = multiprocessing.Queue()
+    q: multiprocessing.Queue = multiprocessing.Queue()
     procs = []
     for _ in range(n_processes):
         p = multiprocessing.Process(
@@ -310,18 +341,22 @@ def check_cross_process_journal_mode(db_path: Path, n_processes: int = 4) -> dic
 
     all_wal = all(r["journal_mode"] == "wal" for r in results)
     passed = len(results) == n_processes and all_wal
+    detail_str = (
+        f"All {len(results)}/{n_processes} processes observed "
+        f"journal_mode='wal': {all_wal}"
+    )
 
     return {
         "check": "cross_process_journal_mode",
         "passed": passed,
         "processes_tested": n_processes,
         "results": results,
-        "details": f"All {len(results)}/{n_processes} processes observed journal_mode='wal': {all_wal}",
+        "details": detail_str,
     }
 
 
 def check_cleanup_and_residual_state(db_path: Path) -> dict[str, Any]:
-    """Verify clean database removal leaves no lingering WAL, SHM or lock files."""
+    """Verify clean database removal leaves no lingering WAL or SHM files."""
     wal_path = Path(str(db_path) + "-wal")
     shm_path = Path(str(db_path) + "-shm")
 
@@ -335,13 +370,17 @@ def check_cleanup_and_residual_state(db_path: Path) -> dict[str, Any]:
     shm_lingers = shm_path.exists()
 
     passed = not (db_lingers or wal_lingers or shm_lingers)
+    detail_str = (
+        f"No lingering files: db={not db_lingers}, wal={not wal_lingers}, "
+        f"shm={not shm_lingers}"
+    )
     return {
         "check": "cleanup_and_residual_state",
         "passed": passed,
         "db_lingers": db_lingers,
         "wal_lingers": wal_lingers,
         "shm_lingers": shm_lingers,
-        "details": f"No lingering files: db={not db_lingers}, wal={not wal_lingers}, shm={not shm_lingers}",
+        "details": detail_str,
     }
 
 
@@ -361,18 +400,20 @@ def run_all_wal_checks(temp_dir: Path | None = None) -> dict[str, Any]:
         chk5 = check_cross_process_journal_mode(db_path, n_processes=4)
         chk6 = check_cleanup_and_residual_state(db_path)
 
-        all_passed = all([
-            chk1["passed"],
-            chk2["passed"],
-            chk3["passed"],
-            chk4["passed"],
-            chk5["passed"],
-            chk6["passed"],
-        ])
+        all_passed = all(
+            [
+                chk1["passed"],
+                chk2["passed"],
+                chk3["passed"],
+                chk4["passed"],
+                chk5["passed"],
+                chk6["passed"],
+            ]
+        )
 
         return {
             "all_passed": all_passed,
-            "timestamp_utc": datetime.now(timezone.utc).isoformat() if "timezone" in globals() else time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "timestamp_utc": datetime.now(UTC).isoformat(),
             "checks": {
                 "checkpoint_behavior": chk1,
                 "shm_lifecycle": chk2,

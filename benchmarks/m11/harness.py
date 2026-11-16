@@ -238,9 +238,7 @@ def _create_temp_db() -> Path:
     return Path(path_str)
 
 
-def _initialize_db(
-    db_path: Path, config: SQLiteBenchmarkConfig | None = None
-) -> None:
+def _initialize_db(db_path: Path, config: SQLiteBenchmarkConfig | None = None) -> None:
     """Apply the production migration to a fresh database and set initial PRAGMAs."""
     migrate_audit_database_idempotent(db_path)
     cfg = config or EXPERIMENT_CONFIGS["A"]
@@ -275,9 +273,7 @@ def apply_benchmark_config(
         row_factory: Any = None,
     ) -> sqlite3.Connection:
         eff_path = backend.app.ml.db.resolve_shared_database_path(database_path)
-        eff_timeout = (
-            expected_bt if eff_path == target_resolved else timeout_ms
-        )
+        eff_timeout = expected_bt if eff_path == target_resolved else timeout_ms
         conn = orig_get_conn(
             database_path=database_path,
             timeout_ms=eff_timeout,
@@ -300,10 +296,18 @@ def apply_benchmark_config(
             verified_count[0] += 1
         return conn
 
-    with patch("backend.app.ml.db.get_db_connection", wrapped_get_connection), \
-         patch("backend.app.ml.audit.get_db_connection", wrapped_get_connection), \
-         patch("backend.app.ml.retraining_metrics.get_db_connection", wrapped_get_connection), \
-         patch("backend.app.ml.migrations.get_db_connection", wrapped_get_connection):
+    with (
+        patch("backend.app.ml.db.get_db_connection", wrapped_get_connection),
+        patch("backend.app.ml.audit.get_db_connection", wrapped_get_connection),
+        patch(
+            "backend.app.ml.retraining_metrics.get_db_connection",
+            wrapped_get_connection,
+        ),
+        patch(
+            "backend.app.ml.migrations.get_db_connection",
+            wrapped_get_connection,
+        ),
+    ):
         yield verified_count
 
 
@@ -1444,7 +1448,9 @@ def _p1_process_worker(
                 # Try claiming whatever is queued
                 try:
                     t0 = time.perf_counter()
-                    claimed = claim_queued_job(database_path=db_path, worker_id=worker_id)
+                    claimed = claim_queued_job(
+                        database_path=db_path, worker_id=worker_id
+                    )
                     dt = time.perf_counter() - t0
                     if warmup_event.is_set():
                         sc_name = (
@@ -1492,9 +1498,7 @@ def _p1_process_worker(
 
         verified = verified_counter[0]
 
-    result_queue.put(
-        {"results": local_results, "verified_connections": verified}
-    )
+    result_queue.put({"results": local_results, "verified_connections": verified})
 
 
 def run_p1_processes(

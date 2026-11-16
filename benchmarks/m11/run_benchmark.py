@@ -525,7 +525,11 @@ def main() -> int:
         "--config",
         choices=["A", "B", "C", "D", "E", "F"],
         default="A",
-        help="SQLite benchmark configuration: A (DELETE 5s baseline), B (WAL 5s), C (WAL 1s), D (WAL 10s), E (DELETE 1s), F (DELETE 10s). (default: A)",
+        help=(
+            "SQLite benchmark configuration: A (DELETE 5s baseline), "
+            "B (WAL 5s), C (WAL 1s), D (WAL 10s), E (DELETE 1s), "
+            "F (DELETE 10s). (default: A)"
+        ),
     )
     parser.add_argument(
         "--profile",
